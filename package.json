@@ -1,0 +1,323 @@
+{
+  "name": "vs-code-agent-manager",
+  "displayName": "VS Code Agent Manager",
+  "description": "Control center for VS Code Copilot agents — dashboard, premium usage tracking, multi-agent ticket workflows, and @route task orchestration.",
+  "version": "1.0.0",
+  "publisher": "vs-code-agent-manager",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BarnsL/VS-Code-Agent-Manager.git"
+  },
+  "engines": {
+    "vscode": "^1.110.0"
+  },
+  "categories": ["AI", "Chat"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "copilot-agents",
+          "title": "Copilot Agents",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "copilot-agents": [
+        {
+          "id": "copilot-agents.dashboard",
+          "name": "Control Center",
+          "type": "webview"
+        },
+        {
+          "id": "copilot-agents.list",
+          "name": "Agent Index",
+          "type": "tree",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "copilot-agents.refresh",
+        "title": "Refresh Agents",
+        "icon": "$(refresh)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.focus",
+        "title": "Open Agent Manager Panel",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.newAgent",
+        "title": "New Agent",
+        "icon": "$(add)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.openAgent",
+        "title": "Open Agent File",
+        "icon": "$(go-to-file)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.invokeAgent",
+        "title": "Invoke in Chat",
+        "icon": "$(comment-discussion)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.copyMention",
+        "title": "Copy @mention",
+        "icon": "$(copy)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.deleteAgent",
+        "title": "Delete Agent",
+        "icon": "$(trash)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.duplicateToUser",
+        "title": "Duplicate to User Agents",
+        "icon": "$(files)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.routeTask",
+        "title": "Route Task to Agent",
+        "icon": "$(debug-start)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.newTicket",
+        "title": "Create Ticket Workflow",
+        "icon": "$(note)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.runTicketStep",
+        "title": "Run Next Ticket Step",
+        "icon": "$(play)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.completeTicketStep",
+        "title": "Complete Active Ticket Step",
+        "icon": "$(pass)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.configureUsage",
+        "title": "Configure Copilot Usage Tracking",
+        "icon": "$(settings-gear)",
+        "category": "Copilot Agents"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "copilot-agents.newTicket",
+          "when": "view == copilot-agents.dashboard",
+          "group": "navigation@1"
+        },
+        {
+          "command": "copilot-agents.configureUsage",
+          "when": "view == copilot-agents.dashboard",
+          "group": "navigation@2"
+        },
+        {
+          "command": "copilot-agents.refresh",
+          "when": "view == copilot-agents.dashboard",
+          "group": "navigation@3"
+        },
+        {
+          "command": "copilot-agents.newAgent",
+          "when": "view == copilot-agents.list",
+          "group": "navigation@1"
+        },
+        {
+          "command": "copilot-agents.routeTask",
+          "when": "view == copilot-agents.list",
+          "group": "navigation@2"
+        },
+        {
+          "command": "copilot-agents.newTicket",
+          "when": "view == copilot-agents.list",
+          "group": "navigation@3"
+        },
+        {
+          "command": "copilot-agents.refresh",
+          "when": "view == copilot-agents.list",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "copilot-agents.invokeAgent",
+          "when": "view == copilot-agents.list && viewItem =~ /^agent-/",
+          "group": "inline@1"
+        },
+        {
+          "command": "copilot-agents.openAgent",
+          "when": "view == copilot-agents.list && viewItem == agent-editable",
+          "group": "inline@2"
+        },
+        {
+          "command": "copilot-agents.copyMention",
+          "when": "view == copilot-agents.list && viewItem =~ /^agent-/",
+          "group": "1_main@1"
+        },
+        {
+          "command": "copilot-agents.openAgent",
+          "when": "view == copilot-agents.list && viewItem =~ /^agent-/",
+          "group": "1_main@2"
+        },
+        {
+          "command": "copilot-agents.duplicateToUser",
+          "when": "view == copilot-agents.list && viewItem == agent-extension",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "copilot-agents.deleteAgent",
+          "when": "view == copilot-agents.list && viewItem == agent-editable",
+          "group": "9_delete"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "copilot-agents.openAgent"
+        },
+        {
+          "command": "copilot-agents.newAgent"
+        },
+        {
+          "command": "copilot-agents.routeTask"
+        },
+        {
+          "command": "copilot-agents.newTicket"
+        },
+        {
+          "command": "copilot-agents.runTicketStep"
+        },
+        {
+          "command": "copilot-agents.completeTicketStep"
+        },
+        {
+          "command": "copilot-agents.configureUsage"
+        },
+        {
+          "command": "copilot-agents.refresh"
+        },
+        {
+          "command": "copilot-agents.focus"
+        },
+        {
+          "command": "copilot-agents.invokeAgent",
+          "when": "false"
+        },
+        {
+          "command": "copilot-agents.copyMention",
+          "when": "false"
+        },
+        {
+          "command": "copilot-agents.deleteAgent",
+          "when": "false"
+        },
+        {
+          "command": "copilot-agents.duplicateToUser",
+          "when": "false"
+        }
+      ]
+    },
+    "chatParticipants": [
+      {
+        "id": "copilot-task-router.route",
+        "name": "route",
+        "fullName": "Agent Router",
+        "description": "Analyzes your task and routes to the best Copilot agent. Use /list to see all agents.",
+        "isSticky": false,
+        "commands": [
+          {
+            "name": "list",
+            "description": "List all available agents grouped by source"
+          },
+          {
+            "name": "ticket",
+            "description": "Create a tracked multi-agent workflow ticket from a task"
+          }
+        ],
+        "disambiguation": [
+          {
+            "category": "debug-task",
+            "description": "User has a bug, error, exception, test failure, or something that is broken or not working",
+            "examples": [
+              "My tests are failing after refactoring",
+              "I'm getting a TypeError in production",
+              "The build is broken",
+              "Something stopped working after my last commit"
+            ]
+          },
+          {
+            "category": "feature-task",
+            "description": "User wants to add a new feature, implement functionality, or build something new",
+            "examples": [
+              "I want to add OAuth2 login",
+              "Build a caching layer for the API",
+              "Create a settings page",
+              "Add pagination to this list"
+            ]
+          },
+          {
+            "category": "planning-task",
+            "description": "User wants to plan, design, write a spec, or architect something before coding",
+            "examples": [
+              "Help me plan this refactor",
+              "Write a spec for this feature",
+              "Design the database schema",
+              "What's the best architecture for this?"
+            ]
+          },
+          {
+            "category": "review-task",
+            "description": "User has code review feedback to handle, or wants their code reviewed",
+            "examples": [
+              "I got feedback on my PR",
+              "The reviewer said my code is too complex",
+              "Handle these code review comments",
+              "Ready to submit for code review"
+            ]
+          },
+          {
+            "category": "completion-task",
+            "description": "User is done implementing and wants to wrap up, merge, verify, or ship",
+            "examples": [
+              "All tests pass, ready to merge",
+              "Done with this feature branch",
+              "Verify my work before merging",
+              "Should I merge this now?"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "build": "npm run compile",
+    "package": "vsce package --allow-missing-repository",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.110.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.9.3"
+  }
+}
