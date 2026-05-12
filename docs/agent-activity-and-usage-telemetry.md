@@ -52,6 +52,24 @@ Usage increments on `recordAgentLaunch(...)`, which is called by:
 
 The final item above closes a prior accounting gap where `Invoke in Chat` opened chat but did not increment estimated premium usage.
 
+### Fast Accuracy Sync From Copilot UI
+
+To align the status tooltip with VS Code's Copilot usage panel quickly, the extension now includes:
+
+- Command: `Copilot Agents: Sync Usage From Copilot Panel`
+
+Workflow:
+
+1. Select plan (`Free`, `Pro`, `Pro+`, or `Custom`).
+2. Enter `% used` from Copilot quick settings (for example `40%`).
+3. Extension computes baseline used with:
+
+`baselineUsed = round((percentUsed / 100) * monthlyQuota, 2)`
+
+4. Baseline is persisted through `configureUsage(...)` and reflected in status tooltip immediately.
+
+This command is intended for reconciliation when provider UI and local estimates diverge.
+
 ### Tooltip Fields
 
 The status bar tooltip now reports:
@@ -76,3 +94,4 @@ This makes quota interpretation explicit and avoids ambiguity about what is esti
 2. Create a ticket and launch a step; confirm step appears under `Active Now`.
 3. Complete an active step; confirm it leaves `Active Now` and next step appears under `Queued Next`.
 4. Confirm `Recent Agent Events` includes launch/step entries with agent names.
+5. Run `Copilot Agents: Sync Usage From Copilot Panel` with `40%` on a `Pro+` plan and confirm tooltip reports approximately `600/1500` used (or equivalent based on input precision).

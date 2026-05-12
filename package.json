@@ -135,6 +135,12 @@
         "title": "Configure Copilot Usage Tracking",
         "icon": "$(settings-gear)",
         "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.syncUsageFromCopilotPanel",
+        "title": "Sync Usage From Copilot Panel",
+        "icon": "$(graph)",
+        "category": "Copilot Agents"
       }
     ],
     "menus": {
@@ -241,6 +247,9 @@
         },
         {
           "command": "copilot-agents.configureUsage"
+        },
+        {
+          "command": "copilot-agents.syncUsageFromCopilotPanel"
         },
         {
           "command": "copilot-agents.refresh"

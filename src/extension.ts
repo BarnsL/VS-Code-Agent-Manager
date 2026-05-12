@@ -191,6 +191,12 @@ function formatUsageValue(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
+function parsePercentInput(value: string): number {
+  const normalized = value.trim().replace(/%$/, "");
+  const parsed = Number(normalized);
+  return parsed;
+}
+
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
@@ -470,6 +476,80 @@ export function activate(context: vscode.ExtensionContext): void {
     refreshAll();
   }
 
+  async function syncUsageFromCopilotPanel(): Promise<void> {
+    const presets = [
+      { label: "Copilot Free", quota: 50, id: "free" },
+      { label: "Copilot Pro", quota: 300, id: "pro" },
+      { label: "Copilot Pro+", quota: 1500, id: "pro+" },
+      { label: "Custom", quota: 0, id: "custom" },
+    ];
+    const preset = await vscode.window.showQuickPick(
+      presets.map((item) => ({
+        label: item.label,
+        detail: item.quota > 0 ? `${item.quota} premium requests / month` : "Set a custom monthly quota",
+        id: item.id,
+        quota: item.quota,
+      })),
+      { placeHolder: "Select the plan shown in Copilot Usage" }
+    );
+    if (!preset) return;
+
+    let quota = preset.quota;
+    if (preset.id === "custom") {
+      const customQuota = await vscode.window.showInputBox({
+        prompt: "Monthly premium request limit",
+        placeHolder: "1500",
+        validateInput: (value) => {
+          const parsed = Number(value.trim());
+          return Number.isFinite(parsed) && parsed > 0 ? null : "Enter a positive number";
+        },
+      });
+      if (!customQuota) return;
+      quota = Number(customQuota.trim());
+    }
+
+    const percentUsedInput = await vscode.window.showInputBox({
+      prompt: "Included premium requests used (percent)",
+      placeHolder: "40 or 40%",
+      validateInput: (value) => {
+        const parsed = parsePercentInput(value);
+        return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100
+          ? null
+          : "Enter a percent between 0 and 100";
+      },
+    });
+    if (!percentUsedInput) return;
+
+    const percentUsed = parsePercentInput(percentUsedInput);
+    const baselineUsed = Math.round(((percentUsed / 100) * quota) * 100) / 100;
+
+    const current = opsStore.getUsage();
+    const baselineTokensInput = await vscode.window.showInputBox({
+      prompt: "Seed estimated prompt tokens already used",
+      placeHolder: String(current.estimatedTokenUnits),
+      value: String(current.estimatedTokenUnits),
+      validateInput: (value) => {
+        const parsed = Number(value.trim());
+        return Number.isFinite(parsed) && parsed >= 0 ? null : "Enter a non-negative number";
+      },
+    });
+    if (!baselineTokensInput) return;
+
+    await opsStore.configureUsage({
+      planId: preset.id,
+      planLabel: preset.label,
+      monthlyQuota: quota,
+      trackingMode: "estimated",
+      baselinePremiumUsed: baselineUsed,
+      baselineTokens: Number(baselineTokensInput.trim()),
+    });
+
+    refreshAll();
+    vscode.window.showInformationMessage(
+      `Usage synced from ${percentUsed.toFixed(1)}%: ${formatUsageValue(baselineUsed)} used, ${formatUsageValue(Math.max(0, quota - baselineUsed))} remaining.`
+    );
+  }
+
   async function launchTicketStep(ticketId: string): Promise<void> {
     const started = await opsStore.beginNextStep(ticketId);
     if (!started) {
@@ -578,6 +658,12 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("copilot-agents.configureUsage", async () => {
       await configureUsage();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("copilot-agents.syncUsageFromCopilotPanel", async () => {
+      await syncUsageFromCopilotPanel();
     })
   );
 

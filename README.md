@@ -2,8 +2,6 @@
 
 A native VS Code extension that turns your Copilot agent files into a fully managed control center — with a live dashboard, premium usage tracking, multi-agent ticket workflows, and one-click `@route` orchestration.
 
-![VS Code Agent Manager dashboard](https://raw.githubusercontent.com/BarnsL/VS-Code-Agent-Manager/main/media/dashboard-preview.png)
-
 ---
 
 ## Features
@@ -37,6 +35,7 @@ Because GitHub does not expose live per-user Copilot premium balances to extensi
 
 - Supports **Copilot Free** (50/mo), **Copilot Pro** (300/mo), **Copilot Pro+** (1500/mo), or a **Custom** quota  
 - Seed your current baseline at any time via *Configure Copilot Usage Tracking* in the command palette  
+- Quickly match the VS Code Copilot panel using *Sync Usage From Copilot Panel* (enter `% used`, e.g. `40%`)  
 - Status bar shows `🤖 <agents>  🎫 <open tickets>  📊 <used>/<quota>` at a glance
 - Status tooltip now includes explicit **Plan limit**, **Used**, **Remaining**, **Last updated**, and tracking-source note for clearer quota interpretation
 - Usage is now recorded consistently from all launch entry points, including **Invoke in Chat** from Agent Index
@@ -123,6 +122,7 @@ Command palette → **Copilot Agents: New Agent** → choose a template (Debuggi
 | `Copilot Agents: Complete Active Ticket Step` | Mark the current step done with a summary |
 | `Copilot Agents: Seed Required Feature Tickets` | Create roadmap tickets for auto-assignment, chat orchestration, and completion-driven lifecycle |
 | `Copilot Agents: Configure Copilot Usage Tracking` | Set plan and seed baseline usage |
+| `Copilot Agents: Sync Usage From Copilot Panel` | Seed usage from Copilot Quick Settings percent-used value |
 | `Copilot Agents: Refresh Agents` | Re-scan all agent discovery paths |
 
 ---
