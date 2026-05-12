@@ -24,12 +24,22 @@ A webview panel surfaced in the Copilot Agents activity-bar container that gives
 - **Activity feed** — every agent launch, ticket creation, and handoff in chronological order  
 - **Usage meter** — real-time estimated premium request consumption with a progress bar
 
+### Agent Activity (Left Sidebar)
+A dedicated tree view in the same Copilot Agents activity-bar container shows what agents are doing right now, similar to operational sidebars in Amazon Q-style tooling.
+
+- **Active Now** — currently running ticket step per agent, with one-click complete
+- **Queued Next** — next queued step per ticket, with one-click run
+- **Recent Agent Events** — latest launch and workflow events grouped by agent
+- Each row is actionable so you can continue workflows without opening the dashboard first
+
 ### Premium Usage Tracking
 Because GitHub does not expose live per-user Copilot premium balances to extensions, the extension tracks usage by counting agent launches and estimating token cost.
 
 - Supports **Copilot Free** (50/mo), **Copilot Pro** (300/mo), **Copilot Pro+** (1500/mo), or a **Custom** quota  
 - Seed your current baseline at any time via *Configure Copilot Usage Tracking* in the command palette  
 - Status bar shows `🤖 <agents>  🎫 <open tickets>  📊 <used>/<quota>` at a glance
+- Status tooltip now includes explicit **Plan limit**, **Used**, **Remaining**, **Last updated**, and tracking-source note for clearer quota interpretation
+- Usage is now recorded consistently from all launch entry points, including **Invoke in Chat** from Agent Index
 
 ### Multi-Agent Ticket Workflows
 Break complex tasks into ordered, agent-specific steps and track them from creation through completion.
@@ -73,6 +83,11 @@ Type `@route <task>` in Copilot Chat to instantly get a ranked list of agents fo
 - Click the **robot icon** in the activity bar → **Control Center**  
 - Use the command palette: **Copilot Agents: Open Agent Manager Panel**  
 - Click the status bar item in the lower-right corner
+
+### Monitoring Agent Execution
+- In the same activity bar container, open **Agent Activity** for a live operations list
+- Use **Active Now** and **Queued Next** rows to run/complete ticket steps directly
+- Use **Recent Agent Events** to open the relevant agent file quickly
 
 ### Creating a Ticket
 1. Command palette → **Copilot Agents: Create Ticket Workflow**  

@@ -33,6 +33,12 @@
           "type": "webview"
         },
         {
+          "id": "copilot-agents.activity",
+          "name": "Agent Activity",
+          "type": "tree",
+          "icon": "$(pulse)"
+        },
+        {
           "id": "copilot-agents.list",
           "name": "Agent Index",
           "type": "tree",
@@ -61,6 +67,12 @@
       {
         "command": "copilot-agents.openAgent",
         "title": "Open Agent File",
+        "icon": "$(go-to-file)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.openAgentByName",
+        "title": "Open Agent By Name",
         "icon": "$(go-to-file)",
         "category": "Copilot Agents"
       },
@@ -148,6 +160,16 @@
           "group": "navigation@1"
         },
         {
+          "command": "copilot-agents.refresh",
+          "when": "view == copilot-agents.activity",
+          "group": "navigation@1"
+        },
+        {
+          "command": "copilot-agents.runTicketStep",
+          "when": "view == copilot-agents.activity",
+          "group": "navigation@2"
+        },
+        {
           "command": "copilot-agents.routeTask",
           "when": "view == copilot-agents.list",
           "group": "navigation@2"
@@ -232,6 +254,10 @@
         },
         {
           "command": "copilot-agents.copyMention",
+          "when": "false"
+        },
+        {
+          "command": "copilot-agents.openAgentByName",
           "when": "false"
         },
         {

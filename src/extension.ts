@@ -4,6 +4,7 @@ import * as path from "path";
 import { AgentInfo, AgentSource, USER_PROMPTS_DIR, discoverAllAgents, routeTask } from "./agents";
 import { AgentTreeProvider, AgentLeafItem } from "./treeView";
 import { AgentDashboardViewProvider } from "./dashboardView";
+import { AgentActivityProvider } from "./activityView";
 import { AgentOpsStore, AgentTicket, DashboardSnapshot, WorkflowStep, deriveTitleFromPrompt } from "./state";
 import { REQUIRED_FEATURE_TICKETS } from "./roadmap";
 
@@ -168,13 +169,26 @@ const AGENT_MANAGER_CONTAINER_ID = "copilot-agents";
 const AGENT_MANAGER_DASHBOARD_VIEW_ID = "copilot-agents.dashboard";
 
 function updateStatusBar(item: vscode.StatusBarItem, snapshot: DashboardSnapshot): void {
-  item.text = `$(robot) ${snapshot.agentCounts.total}  $(issues) ${snapshot.ticketCounts.open}  $(graph) ${snapshot.usage.estimatedUsedPremium}/${snapshot.usage.monthlyQuota}`;
+  const used = formatUsageValue(snapshot.usage.estimatedUsedPremium);
+  const quota = formatUsageValue(snapshot.usage.monthlyQuota);
+  const remaining = formatUsageValue(snapshot.usage.remainingPremium);
+  item.text = `$(robot) ${snapshot.agentCounts.total}  $(issues) ${snapshot.ticketCounts.open}  $(graph) ${used}/${quota}`;
   item.tooltip = [
     `Copilot Agent Manager`,
     `${snapshot.agentCounts.total} indexed agents`,
     `${snapshot.ticketCounts.open} open tickets`,
-    `${snapshot.usage.remainingPremium} premium requests remaining (${snapshot.usage.trackingMode})`,
+    `Plan: ${snapshot.usage.planLabel} (${quota} monthly premium limit)`,
+    `Used: ${used} estimated premium`,
+    `Remaining: ${remaining} (${snapshot.usage.trackingMode} tracking)`,
+    snapshot.usage.lastUpdatedAt
+      ? `Updated: ${new Date(snapshot.usage.lastUpdatedAt).toLocaleString()}`
+      : `Updated: not yet tracked`,
+    snapshot.usage.dataSourceNote,
   ].join("\n");
+}
+
+function formatUsageValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function ensureDir(dir: string): void {
@@ -245,6 +259,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const opsStore = new AgentOpsStore(context);
 
   const snapshotFor = (): DashboardSnapshot => opsStore.getSnapshot(tree.getAll());
+  const activityProvider = new AgentActivityProvider(snapshotFor);
 
   const dashboard = new AgentDashboardViewProvider(context.extensionUri, {
     getSnapshot: snapshotFor,
@@ -290,6 +305,13 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(treeView);
 
+  const activityTreeView = vscode.window.createTreeView("copilot-agents.activity", {
+    treeDataProvider: activityProvider,
+    showCollapseAll: true,
+    canSelectMany: false,
+  });
+  context.subscriptions.push(activityTreeView);
+
   // ── Status Bar ──────────────────────────────────────────────────────────────
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
@@ -304,6 +326,7 @@ export function activate(context: vscode.ExtensionContext): void {
     tree.refresh();
     const snapshot = snapshotFor();
     updateStatusBar(statusBar, snapshot);
+    activityProvider.refresh(snapshot);
     dashboard.refresh(snapshot);
   };
 
@@ -587,6 +610,17 @@ export function activate(context: vscode.ExtensionContext): void {
     )
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand("copilot-agents.openAgentByName", async (agentName: string) => {
+      const agent = tree.byName(agentName);
+      if (!agent) {
+        vscode.window.showInformationMessage(`Agent not found: @${agentName}`);
+        return;
+      }
+      await vscode.commands.executeCommand("copilot-agents.openAgent", agent);
+    })
+  );
+
   // ── Command: Invoke in Chat ─────────────────────────────────────────────────
   context.subscriptions.push(
     vscode.commands.registerCommand(
@@ -596,6 +630,13 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!agent) return;
         const mention = `@${agent.name} `;
         await openChatQuery(mention, `@${agent.name} copied to clipboard — paste in chat`);
+        // Keep premium telemetry consistent across every agent launch entry point.
+        await opsStore.recordAgentLaunch({
+          agentName: agent.name,
+          model: agent.model,
+          promptText: mention,
+          source: "invoke-agent-command",
+        });
         await opsStore.recordEvent({
           type: "agent-invoked",
           message: `Opened chat for @${agent.name}`,
