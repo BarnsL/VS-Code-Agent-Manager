@@ -5,6 +5,7 @@ import { AgentInfo, AgentSource, USER_PROMPTS_DIR, discoverAllAgents, routeTask 
 import { AgentTreeProvider, AgentLeafItem } from "./treeView";
 import { AgentDashboardViewProvider } from "./dashboardView";
 import { AgentOpsStore, AgentTicket, DashboardSnapshot, WorkflowStep, deriveTitleFromPrompt } from "./state";
+import { REQUIRED_FEATURE_TICKETS } from "./roadmap";
 
 // ─── Agent Creation Templates ─────────────────────────────────────────────────
 
@@ -347,6 +348,39 @@ export function activate(context: vscode.ExtensionContext): void {
     return ticket;
   }
 
+  async function seedRequiredFeatureTickets(): Promise<void> {
+    const existing = new Set(
+      opsStore
+        .getTickets()
+        .map((ticket) => ticket.title.trim().toLowerCase())
+    );
+
+    let createdCount = 0;
+    let skippedCount = 0;
+    for (const spec of REQUIRED_FEATURE_TICKETS) {
+      const normalizedTitle = spec.title.trim().toLowerCase();
+      if (existing.has(normalizedTitle)) {
+        skippedCount += 1;
+        continue;
+      }
+
+      await opsStore.createTicket({
+        title: spec.title,
+        prompt: spec.prompt,
+        routeResults: routeTask(spec.prompt),
+        workspaceLabel: getWorkspaceLabel(),
+      });
+      existing.add(normalizedTitle);
+      createdCount += 1;
+    }
+
+    refreshAll();
+    await focusAgentManager();
+    vscode.window.showInformationMessage(
+      `Feature roadmap tickets: ${createdCount} created, ${skippedCount} skipped (already existed).`
+    );
+  }
+
   async function configureUsage(): Promise<void> {
     const presets = [
       { label: "Copilot Free", quota: 50, id: "free" },
@@ -489,6 +523,12 @@ export function activate(context: vscode.ExtensionContext): void {
       const prompt = await promptForTicket();
       if (!prompt) return;
       await createTicketFromPrompt(prompt);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("copilot-agents.seedRequiredFeatureTickets", async () => {
+      await seedRequiredFeatureTickets();
     })
   );
 

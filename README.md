@@ -106,8 +106,23 @@ Command palette → **Copilot Agents: New Agent** → choose a template (Debuggi
 | `Copilot Agents: Create Ticket Workflow` | Create a multi-step agent ticket |
 | `Copilot Agents: Run Next Ticket Step` | Launch the next queued step in chat |
 | `Copilot Agents: Complete Active Ticket Step` | Mark the current step done with a summary |
+| `Copilot Agents: Seed Required Feature Tickets` | Create roadmap tickets for auto-assignment, chat orchestration, and completion-driven lifecycle |
 | `Copilot Agents: Configure Copilot Usage Tracking` | Set plan and seed baseline usage |
 | `Copilot Agents: Refresh Agents` | Re-scan all agent discovery paths |
+
+---
+
+## Product Roadmap Tickets
+
+Use the command palette action **Copilot Agents: Seed Required Feature Tickets** to create a ready-to-run backlog in the dashboard ticket board.
+
+This backlog explicitly covers:
+
+- Automatic agent assignment for each new job
+- Chat-first orchestration and structured handoffs
+- Task ticket lifecycle that remains active until completion
+
+Detailed external benchmarking and ticket definitions are documented in `docs/agent-orchestration-research-and-feature-tickets.md`.
 
 ---
 

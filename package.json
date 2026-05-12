@@ -113,6 +113,12 @@
         "category": "Copilot Agents"
       },
       {
+        "command": "copilot-agents.seedRequiredFeatureTickets",
+        "title": "Seed Required Feature Tickets",
+        "icon": "$(checklist)",
+        "category": "Copilot Agents"
+      },
+      {
         "command": "copilot-agents.configureUsage",
         "title": "Configure Copilot Usage Tracking",
         "icon": "$(settings-gear)",
@@ -207,6 +213,9 @@
         },
         {
           "command": "copilot-agents.completeTicketStep"
+        },
+        {
+          "command": "copilot-agents.seedRequiredFeatureTickets"
         },
         {
           "command": "copilot-agents.configureUsage"

@@ -42,6 +42,7 @@ const agents_1 = require("./agents");
 const treeView_1 = require("./treeView");
 const dashboardView_1 = require("./dashboardView");
 const state_1 = require("./state");
+const roadmap_1 = require("./roadmap");
 // ─── Agent Creation Templates ─────────────────────────────────────────────────
 const TEMPLATES = {
     debugging: (name) => `---
@@ -332,6 +333,31 @@ function activate(context) {
         vscode.window.showInformationMessage(`Created ticket: ${ticket.title} (${ticket.recommendedAgents.map((name) => `@${name}`).join(", ")})`);
         return ticket;
     }
+    async function seedRequiredFeatureTickets() {
+        const existing = new Set(opsStore
+            .getTickets()
+            .map((ticket) => ticket.title.trim().toLowerCase()));
+        let createdCount = 0;
+        let skippedCount = 0;
+        for (const spec of roadmap_1.REQUIRED_FEATURE_TICKETS) {
+            const normalizedTitle = spec.title.trim().toLowerCase();
+            if (existing.has(normalizedTitle)) {
+                skippedCount += 1;
+                continue;
+            }
+            await opsStore.createTicket({
+                title: spec.title,
+                prompt: spec.prompt,
+                routeResults: (0, agents_1.routeTask)(spec.prompt),
+                workspaceLabel: getWorkspaceLabel(),
+            });
+            existing.add(normalizedTitle);
+            createdCount += 1;
+        }
+        refreshAll();
+        await focusAgentManager();
+        vscode.window.showInformationMessage(`Feature roadmap tickets: ${createdCount} created, ${skippedCount} skipped (already existed).`);
+    }
     async function configureUsage() {
         const presets = [
             { label: "Copilot Free", quota: 50, id: "free" },
@@ -453,6 +479,9 @@ function activate(context) {
         if (!prompt)
             return;
         await createTicketFromPrompt(prompt);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.seedRequiredFeatureTickets", async () => {
+        await seedRequiredFeatureTickets();
     }));
     context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.runTicketStep", async (ticketId) => {
         const ticket = ticketId
