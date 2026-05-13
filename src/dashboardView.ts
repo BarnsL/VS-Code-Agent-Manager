@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
-import { DashboardSnapshot, TicketStatus, humanizeAgentName } from "./state";
-import { getQueueActionLabel } from "./workflowAutomation";
+import { DashboardSnapshot, TicketStatus } from "./state";
 
 const STATUS_COLUMNS: Array<{ status: TicketStatus; label: string }> = [
   { status: "new", label: "New" },
@@ -26,7 +25,9 @@ export interface DashboardActions {
   setContinuousMode(ticketId: string, enabled: boolean): Thenable<void>;
   /** v1.3.0 — toggle whether steps run autonomously through vscode.lm. */
   setAutonomousMode(ticketId: string, enabled: boolean): Thenable<void>;
-  setAutoProceedWorkflow(enabled: boolean): Thenable<void>;
+  setTicketSteering(ticketId: string, steeringNote: string): Thenable<void>;
+  acceptTicketClosure(ticketId: string): Thenable<void>;
+  continueTicketWithSteering(ticketId: string): Thenable<void>;
   /** v1.1.0 — list known agent names so reassignment / parallel pickers can render. */
   listAgents(): string[];
   configureUsage(): Thenable<void>;
@@ -60,6 +61,7 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
         agentName?: string;
         workflowResult?: string;
         stepOutput?: string;
+        steeringNote?: string;
         enabled?: boolean;
       };
 
@@ -110,9 +112,19 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
             await this.actions.setAutonomousMode(payload.ticketId, payload.enabled);
           }
           return;
-        case "setAutoProceedWorkflow":
-          if (typeof payload.enabled === "boolean") {
-            await this.actions.setAutoProceedWorkflow(payload.enabled);
+        case "setTicketSteering":
+          if (payload.ticketId) {
+            await this.actions.setTicketSteering(payload.ticketId, payload.steeringNote ?? "");
+          }
+          return;
+        case "acceptTicketClosure":
+          if (payload.ticketId) {
+            await this.actions.acceptTicketClosure(payload.ticketId);
+          }
+          return;
+        case "continueTicketWithSteering":
+          if (payload.ticketId) {
+            await this.actions.continueTicketWithSteering(payload.ticketId);
           }
           return;
         case "configureUsage":
@@ -145,44 +157,6 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
 
   private renderHtml(webview: vscode.Webview, snapshot: DashboardSnapshot): string {
     const nonce = getNonce();
-    const progressWidth = `${snapshot.usage.percentUsed}%`;
-    const queueMarkup = snapshot.queue.length
-      ? snapshot.queue
-          .map((item) => {
-            const buttonLabel = getQueueActionLabel({
-              status: item.status,
-              autoProceedEnabled: snapshot.workflowAutomation.autoProceedEnabled,
-            });
-            // active / awaiting-output: jump straight to the per-step output
-            // textarea on the ticket card; queued: launch the next step.
-            const commandType =
-              item.status === "queued" ? "runTicketStep" : "focusTicket";
-            return `
-              <article class="queue-item">
-                <div>
-                  <div class="queue-ticket">${escapeHtml(item.ticketTitle)}</div>
-                  <div class="queue-step">${escapeHtml(item.stepTitle)} · @${escapeHtml(item.agentName)} · <em>${escapeHtml(item.status)}</em></div>
-                </div>
-                <button class="ghost" data-command="${commandType}" data-ticket-id="${escapeHtml(item.ticketId)}">${buttonLabel}</button>
-              </article>
-            `;
-          })
-          .join("")
-      : `<div class="empty-state">No queued ticket steps yet. Create a ticket to seed a multi-agent workflow.</div>`;
-
-    const activityMarkup = snapshot.activity.length
-      ? snapshot.activity
-          .slice(0, 12)
-          .map((event) => `
-            <article class="activity-item">
-              <div class="activity-meta">${formatTimestamp(event.timestamp)}</div>
-              <div class="activity-message">${escapeHtml(event.message)}</div>
-              ${event.agentName ? `<div class="pill muted">@${escapeHtml(event.agentName)}</div>` : ""}
-            </article>
-          `)
-          .join("")
-      : `<div class="empty-state">Agent activity will appear here after routing, ticket creation, and workflow launches.</div>`;
-
     const ticketColumnsMarkup = STATUS_COLUMNS.map(({ status, label }) => {
       const tickets = snapshot.tickets.filter((ticket) => ticket.status === status);
       return `
@@ -205,13 +179,13 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                     const lastDoneStep = [...ticket.steps]
                       .reverse()
                       .find((step) => step.status === "done" && step.analysis);
-                    const lanes = ticket.lanes ?? [];
                     const continuous = Boolean(ticket.continuousMode);
                     const autonomous = Boolean(ticket.autonomousMode);
+                    const awaitingAcceptance = Boolean(ticket.closureRequestedAt) && !ticket.closureAcceptedAt;
+                    const steeringNote = ticket.steeringNote ?? "";
                     const nextAgent = ticket.nextAgentName
                       ? `@${ticket.nextAgentName}`
                       : "Workflow complete";
-                    const primaryAgent = ticket.recommendedAgents[0];
                     const stepFocus = activeStep ?? awaitingStep;
                     const stepFocusBlock = stepFocus
                       ? `
@@ -233,30 +207,45 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                         </div>
                       `
                       : "";
+                    const steeringBlock = status !== "done"
+                      ? `
+                        <div class="step-focus">
+                          <div class="step-focus-head">
+                            <strong>User steering</strong>
+                            <span class="pill muted">optional</span>
+                          </div>
+                          <textarea
+                            class="ticket-steering-input"
+                            data-ticket-id="${escapeHtml(ticket.id)}"
+                            placeholder="Add suggestions to steer the next step or reopen the ticket before closure."
+                          >${escapeHtml(steeringNote)}</textarea>
+                          <div class="step-focus-actions">
+                            <button class="ghost" data-command="setTicketSteering" data-ticket-id="${escapeHtml(ticket.id)}">Save Steering</button>
+                          </div>
+                        </div>
+                      `
+                      : "";
+                    const acceptanceBlock = awaitingAcceptance
+                      ? `
+                        <div class="step-focus closure-gate">
+                          <div class="step-focus-head">
+                            <strong>Ready for closure</strong>
+                            <span class="pill muted">awaiting you</span>
+                          </div>
+                          <div class="ticket-meta">${escapeHtml(ticket.closureSummary ?? "The manager believes this ticket is complete.")}</div>
+                          <div class="step-focus-actions">
+                            <button data-command="acceptTicketClosure" data-ticket-id="${escapeHtml(ticket.id)}">Accept Close</button>
+                            <button class="ghost" data-command="continueTicketWithSteering" data-ticket-id="${escapeHtml(ticket.id)}">Continue With Steering</button>
+                          </div>
+                        </div>
+                      `
+                      : "";
                     const lastAnalysisBlock = lastDoneStep?.analysis
                       ? `
                         <details class="manager-analysis">
                           <summary>Manager analysis \u2014 ${escapeHtml(lastDoneStep.title)} (@${escapeHtml(lastDoneStep.agentName)})</summary>
                           <pre>${escapeHtml(lastDoneStep.analysis)}</pre>
                         </details>
-                      `
-                      : "";
-                    const lanesBlock = lanes.length
-                      ? `
-                        <div class="lanes">
-                          <div class="lanes-head">Parallel lanes</div>
-                          ${lanes
-                            .map(
-                              (lane) => `
-                                <div class="lane">
-                                  <span class="pill">@${escapeHtml(lane.agentName)}</span>
-                                  <span class="lane-label">${escapeHtml(lane.label)}</span>
-                                  <span class="pill muted">${escapeHtml(lane.status)}</span>
-                                </div>
-                              `
-                            )
-                            .join("")}
-                        </div>
                       `
                       : "";
                     return `
@@ -290,9 +279,10 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                           <input type="checkbox" data-command="setAutonomousMode" data-ticket-id="${escapeHtml(ticket.id)}" ${autonomous ? "checked" : ""} />
                           Autonomous mode (run steps via language model API — no chat paste required)
                         </label>
+                        ${acceptanceBlock}
+                        ${steeringBlock}
                         ${stepFocusBlock}
                         ${lastAnalysisBlock}
-                        ${lanesBlock}
                         <div class="ticket-pills">
                           ${ticket.recommendedAgents
                             .map(
@@ -305,15 +295,11 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                             .join("")}
                         </div>
                         <div class="ticket-actions">
-                          <button data-command="runTicketStep" data-ticket-id="${escapeHtml(ticket.id)}">
-                            ${stepFocus ? "Re-Open Active Step" : "Run Next Step"}
-                          </button>
-                          ${primaryAgent && !stepFocus
-                            ? `<button class="ghost" data-command="copyMention" data-agent-name="${escapeHtml(primaryAgent)}">Copy Lead</button>`
-                            : ""}
-                          ${status !== "done"
-                            ? `<button class="ghost" data-command="spawnParallelLane" data-ticket-id="${escapeHtml(ticket.id)}">Spawn Parallel</button>`
-                            : ""}
+                          ${awaitingAcceptance
+                            ? ""
+                            : `<button data-command="runTicketStep" data-ticket-id="${escapeHtml(ticket.id)}">
+                                ${stepFocus ? "Re-Open Active Step" : "Run Next Step"}
+                              </button>`}
                         </div>
                       </article>
                     `;
@@ -482,36 +468,6 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       line-height: 1.45;
     }
 
-    .usage-bar {
-      position: relative;
-      height: 10px;
-      border-radius: 999px;
-      overflow: hidden;
-      background: color-mix(in srgb, var(--stroke) 78%, transparent);
-      margin: 10px 0 14px;
-    }
-
-    .usage-bar > span {
-      position: absolute;
-      inset: 0 auto 0 0;
-      width: ${progressWidth};
-      background: linear-gradient(90deg, #1f8fff, #ffb347);
-      border-radius: inherit;
-    }
-
-    .usage-stats {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-
-    .usage-stats strong {
-      display: block;
-      font-size: 18px;
-      margin-bottom: 4px;
-    }
-
     .usage-note {
       padding: 10px 12px;
       border-radius: 14px;
@@ -591,7 +547,8 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       align-items: center;
       flex-wrap: wrap;
     }
-    .step-output {
+    .step-output,
+    .ticket-steering-input {
       width: 100%;
       min-height: 96px;
       border-radius: 8px;
@@ -603,10 +560,17 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       font-size: 12px;
       resize: vertical;
     }
+    .ticket-steering-input {
+      min-height: 72px;
+    }
     .step-focus-actions {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
+    }
+    .closure-gate {
+      border-style: solid;
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--stroke));
     }
     .manager-analysis {
       margin: 6px 0;
@@ -823,7 +787,7 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       <div>
         <p class="eyebrow">Copilot Agent Manager</p>
         <h1>Control Center</h1>
-        <p class="subline">Route work, track premium usage, and move tickets through multi-agent handoffs from one native VS Code dashboard.</p>
+        <p class="subline">Assign work, steer it when needed, and let tickets progress step-by-step until you accept closure.</p>
       </div>
       <div class="hero-actions">
         <button data-command="createTicket">New Ticket</button>
@@ -844,9 +808,9 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
         <div class="metric-detail">${snapshot.ticketCounts.review} in review · ${snapshot.ticketCounts.blocked} blocked</div>
       </article>
       <article class="metric-card">
-        <span class="metric-label">Queued Steps</span>
-        <div class="metric-value">${snapshot.queue.length}</div>
-        <div class="metric-detail">Systematic handoffs waiting to run</div>
+        <span class="metric-label">Awaiting Acceptance</span>
+        <div class="metric-value">${snapshot.ticketCounts.awaitingAcceptance}</div>
+        <div class="metric-detail">Manager-complete tickets waiting for your sign-off</div>
       </article>
       <article class="metric-card">
         <span class="metric-label">Estimated Premium</span>
@@ -855,66 +819,20 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       </article>
     </section>
 
-    <section class="grid-two">
-      <article class="panel">
-        <h2>Copilot Usage</h2>
-        <p class="subtitle">${escapeHtml(snapshot.usage.planLabel)} · ${escapeHtml(humanizeAgentName(snapshot.usage.trackingMode))} tracking</p>
-        <div class="usage-bar"><span></span></div>
-        <div class="usage-stats">
-          <div>
-            <strong>${snapshot.usage.remainingPremium}</strong>
-            <span class="ticket-meta">remaining premium requests</span>
-          </div>
-          <div>
-            <strong>${snapshot.usage.estimatedTokenUnits}</strong>
-            <span class="ticket-meta">estimated prompt tokens</span>
-          </div>
-        </div>
-        ${snapshot.usage.dataSourceNote ? `<div class="usage-note">${escapeHtml(snapshot.usage.dataSourceNote)}</div>` : ""}
-      </article>
-
-      <article class="panel">
-        <h2>Workflow Queue</h2>
-        <p class="subtitle">The manager surfaces each ticket\u2019s active focus point. Open a ticket to paste its chat output and let the manager analyze + advance.</p>
-        <label class="queue-toggle">
-          <input type="checkbox" id="auto-proceed-toggle" ${snapshot.workflowAutomation.autoProceedEnabled ? "checked" : ""} />
-          Default new tickets to continuous-mode (each ticket can still be toggled individually).
-        </label>
-        <div class="queue-list">${queueMarkup}</div>
-      </article>
-    </section>
-
     <section class="panel ticket-board">
       <div>
         <h2>Ticket Board</h2>
-        <p class="subtitle">Every ticket keeps its own agent chain, handoff summaries, and next recommended step.</p>
+        <p class="subtitle">Each ticket keeps one active step, optional user steering, and a final acceptance gate before closure.</p>
       </div>
       <div class="ticket-columns">${ticketColumnsMarkup}</div>
-    </section>
-
-    <section class="panel">
-      <h2>Recent Activity</h2>
-      <p class="subtitle">Creation, routing, workflow launches, and usage updates are logged here.</p>
-      <div class="activity-list">${activityMarkup}</div>
     </section>
   </main>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const autoProceedToggle = document.getElementById("auto-proceed-toggle");
 
-    if (autoProceedToggle instanceof HTMLInputElement) {
-      autoProceedToggle.addEventListener("change", () => {
-        vscode.postMessage({
-          type: "setAutoProceedWorkflow",
-          enabled: autoProceedToggle.checked,
-        });
-      });
-    }
-
-    // Per-ticket continuous mode toggles. Sent eagerly on change so the
-    // manager state stays in sync with the UI even if the user navigates
-    // away mid-edit.
+    // Per-ticket mode toggles are sent eagerly on change so the manager state
+    // stays in sync with the UI even if the user navigates away mid-edit.
     document.addEventListener("change", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLInputElement)) return;
@@ -950,11 +868,18 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       // ticket card, so we scope our lookup to the same card to avoid
       // forwarding output from a different ticket.
       let stepOutput;
+      let steeringNote;
       if (ticketId) {
         const card = button.closest(".ticket-card");
         const textarea = card ? card.querySelector('textarea.step-output[data-ticket-id="' + ticketId + '"]') : null;
         if (textarea instanceof HTMLTextAreaElement) {
           stepOutput = textarea.value;
+        }
+        const steering = card
+          ? card.querySelector('textarea.ticket-steering-input[data-ticket-id="' + ticketId + '"]')
+          : null;
+        if (steering instanceof HTMLTextAreaElement) {
+          steeringNote = steering.value;
         }
       }
 
@@ -964,6 +889,7 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
         stepId: button.dataset.stepId,
         agentName: button.dataset.agentName,
         stepOutput,
+        steeringNote,
         workflowResult: stepOutput,
       });
     });

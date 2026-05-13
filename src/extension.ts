@@ -273,7 +273,11 @@ function buildTicketQuery(ticket: AgentTicket, step: WorkflowStep): string {
     ? `\n\n## Manager's tailored instructions for this step\n\n${step.prompt.trim()}`
     : "";
 
-  return `${structured}${tailored}`;
+  const steering = ticket.steeringNote?.trim()
+    ? `\n\n## User steering\n\n${ticket.steeringNote.trim()}`
+    : "";
+
+  return `${structured}${steering}${tailored}`;
 }
 
 function pickTicketLabel(ticket: AgentTicket): string {
@@ -327,6 +331,11 @@ function hasConcreteArtifactEvidence(ticket: AgentTicket): boolean {
   return false;
 }
 
+function agentRequiresInteractiveChat(agent: AgentInfo | undefined): boolean {
+  const text = agent?.content?.toLowerCase() ?? "";
+  return /webclaw|cua|browser automation|computer use|mcp/i.test(text);
+}
+
 // ─── Activation ───────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -363,9 +372,14 @@ export function activate(context: vscode.ExtensionContext): void {
     setAutonomousMode: async (ticketId, enabled) => {
       await setAutonomousMode(ticketId, enabled);
     },
-    setAutoProceedWorkflow: async (enabled) => {
-      await opsStore.setWorkflowAutomation({ autoProceedEnabled: enabled });
-      refreshAll();
+    setTicketSteering: async (ticketId, steeringNote) => {
+      await setTicketSteering(ticketId, steeringNote);
+    },
+    acceptTicketClosure: async (ticketId) => {
+      await acceptTicketClosure(ticketId);
+    },
+    continueTicketWithSteering: async (ticketId) => {
+      await continueTicketWithSteering(ticketId);
     },
     listAgents: () => tree.getAll().map((agent) => agent.name),
     configureUsage: async () => {
@@ -670,12 +684,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const agent = tree.byName(started.step.agentName);
     const query = buildTicketQuery(started.ticket, started.step);
+    const requiresInteractiveChat = agentRequiresInteractiveChat(agent);
 
     // v1.3.0 — autonomous mode: skip Copilot Chat and run the step directly
     // through vscode.lm. The captured response is fed back into
     // submitStepOutput so the manager can analyze + plan the next step with no
     // human paste required.
-    if (started.ticket.autonomousMode) {
+    if (started.ticket.autonomousMode && !requiresInteractiveChat) {
       await opsStore.recordAgentLaunch({
         agentName: started.step.agentName,
         model: agent?.model ?? "inherit",
@@ -706,6 +721,12 @@ export function activate(context: vscode.ExtensionContext): void {
       // behave identically.
       await submitStepOutput(started.ticket.id, result.output);
       return;
+    }
+
+    if (started.ticket.autonomousMode && requiresInteractiveChat) {
+      vscode.window.showInformationMessage(
+        `@${started.step.agentName} uses MCP/browser tools, so this step is opening in Copilot Chat instead of autonomous LM mode.`
+      );
     }
 
     await openChatQuery(
@@ -820,6 +841,7 @@ export function activate(context: vscode.ExtensionContext): void {
       workspaceLabel: refreshed.workspaceLabel,
       availableAgents,
       priorSteps: priorRecords,
+      steeringNote: refreshed.steeringNote,
     });
 
     refreshAll();
@@ -846,8 +868,10 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         return;
       }
+      await opsStore.requestTicketClosure(ticket.id, plan.rationale);
+      refreshAll();
       vscode.window.showInformationMessage(
-        `Workflow complete for ticket ${refreshed.title}.${plan.rationale ? ` Manager: ${plan.rationale}` : ""}`
+        `Manager believes ${refreshed.title} is complete and is waiting for your acceptance.${plan.rationale ? ` Manager: ${plan.rationale}` : ""}`
       );
       return;
     }
@@ -893,6 +917,9 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showWarningMessage(
         "Manager rejected an off-task next-step assignment and queued a Re-scope Next Step review."
       );
+      if (refreshed.continuousMode) {
+        await launchTicketStep(ticket.id);
+      }
       return;
     }
 
@@ -1026,6 +1053,59 @@ export function activate(context: vscode.ExtensionContext): void {
         ? "Autonomous mode ON — steps run via the language model API; outputs are captured automatically."
         : "Autonomous mode OFF — steps open in Copilot Chat for human-in-the-loop paste."
     );
+  }
+
+  async function setTicketSteering(
+    ticketId: string,
+    steeringNote: string | undefined
+  ): Promise<void> {
+    await opsStore.setTicketSteering(ticketId, steeringNote ?? "");
+    refreshAll();
+    const trimmed = (steeringNote ?? "").trim();
+    vscode.window.showInformationMessage(
+      trimmed
+        ? "Saved steering. The manager will incorporate it into the next planning cycle."
+        : "Cleared steering for this ticket."
+    );
+  }
+
+  async function acceptTicketClosure(ticketId: string): Promise<void> {
+    const ticket = await opsStore.acceptTicketClosure(ticketId);
+    if (!ticket) return;
+    refreshAll();
+    vscode.window.showInformationMessage(`Accepted and closed ${ticket.title}.`);
+  }
+
+  async function continueTicketWithSteering(ticketId: string): Promise<void> {
+    const ticket = opsStore.findTicket(ticketId);
+    if (!ticket) return;
+    const steering = ticket.steeringNote?.trim();
+    if (!steering) {
+      vscode.window.showWarningMessage(
+        "Add a steering note first, then continue the ticket."
+      );
+      return;
+    }
+
+    const nextAgent =
+      routeTaskAgainstAvailableAgents(`${ticket.prompt}\n${steering}`, tree.getAll())[0]
+        ?.agentName ?? ticket.recommendedAgents[0];
+    if (!nextAgent) return;
+
+    await opsStore.reopenTicket(ticket.id);
+    await opsStore.appendDynamicStep(ticket.id, {
+      agentName: nextAgent,
+      title: "User Steering",
+      prompt:
+        `@${nextAgent}\n` +
+        `The user wants to steer this ticket before closing it. Incorporate the steering below, continue from the already-completed work, and perform the single most relevant next step.\n\n` +
+        `User steering:\n${steering}\n\n` +
+        `Paste your full response back into the Agent Manager queue when finished.`,
+    });
+    refreshAll();
+    if (ticket.continuousMode) {
+      await launchTicketStep(ticket.id);
+    }
   }
 
   // v1.2.0 — manual completion is no longer a silent shortcut. The manager

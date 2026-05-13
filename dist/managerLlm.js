@@ -112,10 +112,15 @@ function buildPlannerUserPrompt(input) {
         `# Ticket: ${input.ticketTitle}`,
         `Workspace: ${input.workspaceLabel}`,
         `Original request:\n${input.originalRequest}`,
+        input.steeringNote?.trim()
+            ? `## User steering\n${input.steeringNote.trim()}`
+            : "",
         `## Available agents\n${agentList}`,
         `## Prior chain\n${priorSection}`,
         `## Decide the next single step now. Respond with JSON only.`,
-    ].join("\n\n");
+    ]
+        .filter(Boolean)
+        .join("\n\n");
 }
 function tryParsePlannerJson(text) {
     const trimmed = text.trim();

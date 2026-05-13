@@ -86,6 +86,14 @@ export interface AgentTicket {
    * human paste.
    */
   autonomousMode?: boolean;
+  /** Optional user steering text that should shape future steps. */
+  steeringNote?: string;
+  /** When set, the manager believes the workflow is complete and is waiting for the user to accept closure. */
+  closureRequestedAt?: string;
+  /** Once set, the user has explicitly accepted the ticket as closed. */
+  closureAcceptedAt?: string;
+  /** Optional manager rationale shown when asking the user to accept closure. */
+  closureSummary?: string;
 }
 
 export interface ActivityEvent {
@@ -125,6 +133,7 @@ export interface DashboardSnapshot {
     blocked: number;
     done: number;
     open: number;
+    awaitingAcceptance: number;
   };
   tickets: AgentTicket[];
   queue: Array<{
@@ -262,9 +271,15 @@ function estimateModelMultiplier(model: string): number {
   return match ? Number(match[1]) : 1;
 }
 
-function deriveTicketStatus(steps: WorkflowStep[]): TicketStatus {
+function deriveTicketStatus(ticket: AgentTicket): TicketStatus {
+  const steps = ticket.steps ?? [];
   if (steps.some((step) => step.status === "blocked")) return "blocked";
-  if (steps.length > 0 && steps.every((step) => step.status === "done")) return "done";
+
+  const allStepsDone = steps.length > 0 && steps.every((step) => step.status === "done");
+  if (allStepsDone) {
+    if (ticket.closureAcceptedAt) return "done";
+    if (ticket.closureRequestedAt) return "review";
+  }
 
   // "awaiting-output" counts as still working — the manager is holding for
   // the prior step's chat output before composing the next prompt.
@@ -289,7 +304,12 @@ function deriveCurrentAgentName(steps: WorkflowStep[]): string | undefined {
   )?.agentName;
 }
 
-function deriveNextAgentName(steps: WorkflowStep[]): string | undefined {
+function deriveNextAgentName(ticket: AgentTicket): string | undefined {
+  if (ticket.closureRequestedAt && !ticket.closureAcceptedAt) {
+    return "Awaiting your acceptance";
+  }
+
+  const steps = ticket.steps ?? [];
   return (
     steps.find(
       (step) => step.status === "active" || step.status === "awaiting-output"
@@ -300,14 +320,26 @@ function deriveNextAgentName(steps: WorkflowStep[]): string | undefined {
 
 function normalizeTicket(ticket: AgentTicket): AgentTicket {
   const steps = ticket.steps ?? [];
-  return {
+  const legacyClosureAcceptedAt =
+    ticket.closureAcceptedAt ||
+    (ticket.status === "done" && steps.length > 0 && steps.every((step) => step.status === "done")
+      ? ticket.updatedAt
+      : undefined);
+  const normalized: AgentTicket = {
     ...ticket,
     workspaceLabel: ticket.workspaceLabel || "Workspace",
     recommendedAgents: dedupeAgents(ticket.recommendedAgents ?? []),
     steps,
-    status: deriveTicketStatus(steps),
+    steeringNote: ticket.steeringNote?.trim(),
+    closureRequestedAt: ticket.closureRequestedAt || legacyClosureAcceptedAt,
+    closureAcceptedAt: legacyClosureAcceptedAt,
+    closureSummary: ticket.closureSummary?.trim(),
+  };
+  return {
+    ...normalized,
+    status: deriveTicketStatus(normalized),
     currentAgentName: deriveCurrentAgentName(steps),
-    nextAgentName: deriveNextAgentName(steps),
+    nextAgentName: deriveNextAgentName(normalized),
   };
 }
 
@@ -418,6 +450,8 @@ export class AgentOpsStore {
       workspaceLabel: input.workspaceLabel || "Workspace",
       createdAt: now,
       updatedAt: now,
+      continuousMode: true,
+      autonomousMode: true,
       steps: buildWorkflow(input.prompt, input.routeResults),
     });
 
@@ -622,6 +656,109 @@ export class AgentOpsStore {
     return normalized;
   }
 
+  /** Persist user steering text so future steps can be shaped without reopening prompts manually. */
+  async setTicketSteering(
+    ticketId: string,
+    steeringNote: string
+  ): Promise<AgentTicket | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const trimmed = steeringNote.trim();
+    const ticket = {
+      ...tickets[ticketIndex],
+      steeringNote: trimmed || undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-steering-updated",
+      message: trimmed
+        ? `${normalized.title} saved user steering`
+        : `${normalized.title} cleared user steering`,
+      ticketId: normalized.id,
+    });
+    return normalized;
+  }
+
+  /** Move the ticket into a user-review gate instead of auto-closing it. */
+  async requestTicketClosure(
+    ticketId: string,
+    summary?: string
+  ): Promise<AgentTicket | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const now = new Date().toISOString();
+    const ticket = {
+      ...tickets[ticketIndex],
+      closureRequestedAt: now,
+      closureAcceptedAt: undefined,
+      closureSummary: summary?.trim() || tickets[ticketIndex].closureSummary,
+      updatedAt: now,
+    };
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-closure-requested",
+      message: `${normalized.title} is awaiting user acceptance before closing`,
+      ticketId: normalized.id,
+    });
+    return normalized;
+  }
+
+  /** User-approved terminal close. Only this transitions an all-done ticket into Done. */
+  async acceptTicketClosure(ticketId: string): Promise<AgentTicket | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const now = new Date().toISOString();
+    const ticket = {
+      ...tickets[ticketIndex],
+      closureRequestedAt: tickets[ticketIndex].closureRequestedAt || now,
+      closureAcceptedAt: now,
+      updatedAt: now,
+    };
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-closure-accepted",
+      message: `${normalized.title} was accepted and closed by the user`,
+      ticketId: normalized.id,
+    });
+    return normalized;
+  }
+
+  /** Re-open a ticket after the user steers it instead of accepting closure. */
+  async reopenTicket(ticketId: string): Promise<AgentTicket | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const ticket = {
+      ...tickets[ticketIndex],
+      closureRequestedAt: undefined,
+      closureAcceptedAt: undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-reopened",
+      message: `${normalized.title} reopened for another steering pass`,
+      ticketId: normalized.id,
+    });
+    return normalized;
+  }
+
   /** Toggle a ticket's per-ticket continuous-mode override. */
   async setTicketContinuousMode(
     ticketId: string,
@@ -803,6 +940,9 @@ export class AgentOpsStore {
       blocked: tickets.filter((ticket) => ticket.status === "blocked").length,
       done: tickets.filter((ticket) => ticket.status === "done").length,
       open: tickets.filter((ticket) => ticket.status !== "done").length,
+      awaitingAcceptance: tickets.filter(
+        (ticket) => Boolean(ticket.closureRequestedAt) && !ticket.closureAcceptedAt
+      ).length,
     };
 
     const queue = tickets

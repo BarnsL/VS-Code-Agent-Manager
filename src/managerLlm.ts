@@ -72,6 +72,7 @@ function buildPlannerUserPrompt(input: {
   workspaceLabel: string;
   availableAgents: Array<{ name: string; description?: string }>;
   priorSteps: PriorStepRecord[];
+  steeringNote?: string;
 }): string {
   const agentList = input.availableAgents.length
     ? input.availableAgents
@@ -106,10 +107,15 @@ function buildPlannerUserPrompt(input: {
     `# Ticket: ${input.ticketTitle}`,
     `Workspace: ${input.workspaceLabel}`,
     `Original request:\n${input.originalRequest}`,
+    input.steeringNote?.trim()
+      ? `## User steering\n${input.steeringNote.trim()}`
+      : "",
     `## Available agents\n${agentList}`,
     `## Prior chain\n${priorSection}`,
     `## Decide the next single step now. Respond with JSON only.`,
-  ].join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function tryParsePlannerJson(text: string): PlannedNextStep | undefined {
@@ -171,6 +177,7 @@ export interface PlanNextStepInput {
   workspaceLabel: string;
   availableAgents: Array<{ name: string; description?: string }>;
   priorSteps: PriorStepRecord[];
+  steeringNote?: string;
   cancellationToken?: vscode.CancellationToken;
 }
 

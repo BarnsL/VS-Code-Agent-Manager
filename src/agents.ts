@@ -149,6 +149,7 @@ interface SignalRule {
 const SIGNAL_RULES: SignalRule[] = [
   { pattern: /vscode|visual.?studio.?code|mcp|register.*(tool|server|integration)|integration/i, agent: "subagent-driven-development", score: 8, reason: "platform integration signal" },
   { pattern: /error|exception|stack.?trace|failing|failed|broken|bug|crash|not.?work/i, agent: "systematic-debugging", score: 10, reason: "debug signal" },
+  { pattern: /function.?test|integration.?test|e2e|end.?to.?end|browser.?test|ui.?test|playwright|webclaw|cua/i, agent: "function-testing", score: 9, reason: "function / browser test signal" },
   { pattern: /automation|workflow|orchestration|agent manager|improve|improvement|optimi[sz]e/i, agent: "subagent-driven-development", score: 7, reason: "automation / implementation improvement" },
   { pattern: /\btest(ing)?\b|evaluate|exercise|smoke.?test|validation/i, agent: "verification-before-completion", score: 6, reason: "testing / evaluation signal" },
   { pattern: /review.?feedback|pr.?comment|lgtm|reviewer.?said|inline.?review/i, agent: "receiving-code-review", score: 10, reason: "review feedback" },
@@ -167,6 +168,7 @@ const SIGNAL_RULES: SignalRule[] = [
 
 const ROUTING_FAMILY_HINTS: Record<string, string[]> = {
   brainstorming: ["brainstorm", "explore", "ideas", "research", "discovery"],
+  "function-testing": ["function", "integration", "e2e", "browser", "test", "webclaw", "cua", "automation"],
   "writing-plans": ["plan", "planning", "design", "spec", "architecture"],
   "executing-plans": ["execute", "implement", "build", "develop", "code"],
   "subagent-driven-development": ["implement", "build", "develop", "code", "feature", "automation", "workflow", "maintain"],
