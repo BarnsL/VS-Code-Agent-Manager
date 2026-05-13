@@ -49,6 +49,7 @@ exports.__test__ = void 0;
 exports.planNextStep = planNextStep;
 exports.analyzeStepOutputWithLm = analyzeStepOutputWithLm;
 exports.formatAnalysisAsMarkdown = formatAnalysisAsMarkdown;
+exports.runStepAutonomously = runStepAutonomously;
 const vscode = __importStar(require("vscode"));
 const PLANNER_SYSTEM = `You are the Agent Manager for a Copilot multi-agent ticket system.
 Given an original user request, the available specialist agents, and the FULL
@@ -288,6 +289,39 @@ function formatAnalysisAsMarkdown(analysis) {
             .join("\n")}`);
     }
     return parts.join("\n\n");
+}
+async function runStepAutonomously(input) {
+    const model = await selectModel();
+    if (!model)
+        return { kind: "no-model" };
+    const systemPreamble = [
+        `You are acting as the @${input.agentName} agent in a Copilot multi-agent ticket system.`,
+        `Follow the instructions defined in your agent definition below verbatim.`,
+        `Your response will be captured by the Agent Manager and forwarded to the next agent in the workflow,`,
+        `so produce a complete, self-contained response. Do NOT ask clarifying questions back \u2014 make the best`,
+        `decision you can with the information given and state your assumptions explicitly.`,
+        input.agentBody ? `\n## Agent definition (@${input.agentName})\n${input.agentBody.trim()}` : "",
+    ]
+        .filter(Boolean)
+        .join("\n");
+    const messages = [
+        vscode.LanguageModelChatMessage.User(`${systemPreamble}\n\n---\n\n${input.prompt}`),
+    ];
+    let raw = "";
+    try {
+        const response = await model.sendRequest(messages, {}, input.cancellationToken ?? new vscode.CancellationTokenSource().token);
+        for await (const chunk of response.text) {
+            raw += chunk;
+            input.onChunk?.(chunk);
+        }
+    }
+    catch (error) {
+        return { kind: "lm-error", error: error instanceof Error ? error.message : String(error) };
+    }
+    const trimmed = raw.trim();
+    if (!trimmed)
+        return { kind: "lm-error", error: "Empty response from language model." };
+    return { kind: "completed", output: trimmed };
 }
 // Exposed only for tests.
 exports.__test__ = { tryParsePlannerJson, tryParseAnalysisJson, buildPlannerUserPrompt };

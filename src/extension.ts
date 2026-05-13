@@ -16,6 +16,7 @@ import {
   analyzeStepOutputWithLm,
   formatAnalysisAsMarkdown,
   planNextStep,
+  runStepAutonomously,
 } from "./managerLlm";
 
 // ─── Agent Creation Templates ─────────────────────────────────────────────────
@@ -305,6 +306,9 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     setContinuousMode: async (ticketId, enabled) => {
       await setContinuousMode(ticketId, enabled);
+    },
+    setAutonomousMode: async (ticketId, enabled) => {
+      await setAutonomousMode(ticketId, enabled);
     },
     setAutoProceedWorkflow: async (enabled) => {
       await opsStore.setWorkflowAutomation({ autoProceedEnabled: enabled });
@@ -612,6 +616,44 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const agent = tree.byName(started.step.agentName);
     const query = buildTicketQuery(started.ticket, started.step);
+
+    // v1.3.0 — autonomous mode: skip Copilot Chat and run the step directly
+    // through vscode.lm. The captured response is fed back into
+    // submitStepOutput so the manager can analyze + plan the next step with no
+    // human paste required.
+    if (started.ticket.autonomousMode) {
+      await opsStore.recordAgentLaunch({
+        agentName: started.step.agentName,
+        model: agent?.model ?? "inherit",
+        promptText: query,
+        source: "ticket-workflow-autonomous",
+        ticketId: started.ticket.id,
+      });
+      refreshAll();
+      const result = await runStepAutonomously({
+        prompt: query,
+        agentName: started.step.agentName,
+        agentBody: agent?.content,
+      });
+      if (result.kind === "no-model") {
+        vscode.window.showWarningMessage(
+          "Autonomous mode requires a Copilot language model. Sign in to Copilot or disable autonomous mode for this ticket."
+        );
+        return;
+      }
+      if (result.kind === "lm-error") {
+        vscode.window.showErrorMessage(
+          `Autonomous run failed for @${started.step.agentName}: ${result.error}. Open the step and run it manually, or disable autonomous mode.`
+        );
+        return;
+      }
+      // Feed the captured output back through the same gate the manual paste
+      // path uses, so analysis + planning + continuous-mode chaining all
+      // behave identically.
+      await submitStepOutput(started.ticket.id, result.output);
+      return;
+    }
+
     await openChatQuery(
       query,
       `Ticket step copied to clipboard for @${started.step.agentName}`
@@ -872,6 +914,21 @@ export function activate(context: vscode.ExtensionContext): void {
     );
   }
 
+  // v1.3.0 — per-ticket autonomous toggle. When ON, launchTicketStep routes
+  // through vscode.lm directly and feeds the response back automatically.
+  async function setAutonomousMode(
+    ticketId: string,
+    enabled: boolean
+  ): Promise<void> {
+    await opsStore.setTicketAutonomousMode(ticketId, enabled);
+    refreshAll();
+    vscode.window.showInformationMessage(
+      enabled
+        ? "Autonomous mode ON — steps run via the language model API; outputs are captured automatically."
+        : "Autonomous mode OFF — steps open in Copilot Chat for human-in-the-loop paste."
+    );
+  }
+
   // v1.2.0 — manual completion is no longer a silent shortcut. The manager
   // refuses to mark a step done without captured chat output. Callers must
   // either route through `submitStepOutput` (with the actual chat response)
@@ -1074,6 +1131,30 @@ export function activate(context: vscode.ExtensionContext): void {
               ))?.value;
         if (typeof value !== "boolean") return;
         await setContinuousMode(ticket.id, value);
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "copilot-agents.setAutonomousMode",
+      async (ticketId?: string, enabled?: boolean) => {
+        const ticket = ticketId
+          ? opsStore.findTicket(ticketId)
+          : await pickTicket((candidate) => candidate.status !== "done");
+        if (!ticket) return;
+        const value =
+          typeof enabled === "boolean"
+            ? enabled
+            : (await vscode.window.showQuickPick(
+                [
+                  { label: "Autonomous ON", value: true },
+                  { label: "Autonomous OFF", value: false },
+                ],
+                { placeHolder: `Autonomous mode for ${ticket.title}` }
+              ))?.value;
+        if (typeof value !== "boolean") return;
+        await setAutonomousMode(ticket.id, value);
       }
     )
   );

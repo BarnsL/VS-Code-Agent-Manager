@@ -62,6 +62,11 @@ class AgentDashboardViewProvider {
                         await this.actions.setContinuousMode(payload.ticketId, payload.enabled);
                     }
                     return;
+                case "setAutonomousMode":
+                    if (payload.ticketId && typeof payload.enabled === "boolean") {
+                        await this.actions.setAutonomousMode(payload.ticketId, payload.enabled);
+                    }
+                    return;
                 case "setAutoProceedWorkflow":
                     if (typeof payload.enabled === "boolean") {
                         await this.actions.setAutoProceedWorkflow(payload.enabled);
@@ -151,6 +156,7 @@ class AgentDashboardViewProvider {
                         .find((step) => step.status === "done" && step.analysis);
                     const lanes = ticket.lanes ?? [];
                     const continuous = Boolean(ticket.continuousMode);
+                    const autonomous = Boolean(ticket.autonomousMode);
                     const nextAgent = ticket.nextAgentName
                         ? `@${ticket.nextAgentName}`
                         : "Workflow complete";
@@ -167,7 +173,7 @@ class AgentDashboardViewProvider {
                           <textarea
                             class="step-output"
                             data-ticket-id="${escapeHtml(ticket.id)}"
-                            placeholder="Paste the agent's full chat output here. The manager will analyze it and ${continuous ? "auto-launch" : "prepare"} the next agent."
+                            placeholder="${autonomous ? "Autonomous mode is ON — the manager will run this step via the language model API and capture output automatically. Click 'Run Next Step' to start." : `Paste the agent's full chat output here. The manager will analyze it and ${continuous ? "auto-launch" : "prepare"} the next agent.`}"
                           >${escapeHtml(stepFocus.output ?? "")}</textarea>
                           <div class="step-focus-actions">
                             <button data-command="submitStepOutput" data-ticket-id="${escapeHtml(ticket.id)}">Submit Output + Analyze</button>
@@ -224,6 +230,10 @@ class AgentDashboardViewProvider {
                         <label class="continuous-toggle">
                           <input type="checkbox" data-command="setContinuousMode" data-ticket-id="${escapeHtml(ticket.id)}" ${continuous ? "checked" : ""} />
                           Continuous mode (auto-launch next agent after each submitted output)
+                        </label>
+                        <label class="continuous-toggle">
+                          <input type="checkbox" data-command="setAutonomousMode" data-ticket-id="${escapeHtml(ticket.id)}" ${autonomous ? "checked" : ""} />
+                          Autonomous mode (run steps via language model API — no chat paste required)
                         </label>
                         ${stepFocusBlock}
                         ${lastAnalysisBlock}
@@ -850,11 +860,12 @@ class AgentDashboardViewProvider {
     document.addEventListener("change", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLInputElement)) return;
-      if (target.dataset.command !== "setContinuousMode") return;
+      const cmd = target.dataset.command;
+      if (cmd !== "setContinuousMode" && cmd !== "setAutonomousMode") return;
       const ticketId = target.dataset.ticketId;
       if (!ticketId) return;
       vscode.postMessage({
-        type: "setContinuousMode",
+        type: cmd,
         ticketId,
         enabled: target.checked,
       });
@@ -871,9 +882,10 @@ class AgentDashboardViewProvider {
         return;
       }
 
-      // Continuous-mode change events are handled by the change listener
-      // above \u2014 click events here would fire as well and double-post.
+      // Continuous/autonomous-mode change events are handled by the change
+      // listener above — click events here would fire as well and double-post.
       if (button.dataset.command === "setContinuousMode") return;
+      if (button.dataset.command === "setAutonomousMode") return;
 
       const ticketId = button.dataset.ticketId;
       // Per-step output textarea lives next to the submit button inside the

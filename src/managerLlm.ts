@@ -323,5 +323,78 @@ export function formatAnalysisAsMarkdown(analysis: StepAnalysis): string {
   return parts.join("\n\n");
 }
 
+// ─── Autonomous step execution (v1.3.0) ──────────────────────────────────────
+//
+// When a ticket is in "autonomous" mode the manager runs each step directly
+// through `vscode.lm.sendRequest` instead of opening the Copilot Chat panel
+// for a human-in-the-loop paste. The agent's `.agent.md` body (frontmatter +
+// instructions) is injected as the system message so the LM behaves like the
+// chat participant would. The full streamed response is returned to the
+// caller, which then feeds it back into `submitStepOutput` so the manager can
+// analyze + plan the next step with no human interaction.
+//
+// Caveat: this bypass means real chat-participant tools (file edits, terminal
+// runs, etc.) are NOT executed. Use autonomous mode for analysis / planning /
+// brainstorming agents; use the chat-paste flow when you need real tool side
+// effects.
+
+export type RunAutonomousStepResult =
+  | { kind: "completed"; output: string }
+  | { kind: "no-model" }
+  | { kind: "lm-error"; error: string };
+
+export interface RunAutonomousStepInput {
+  /** The composed ticket prompt (built by buildTicketQuery). */
+  prompt: string;
+  /** Agent name for labeling. */
+  agentName: string;
+  /** The agent's .agent.md content (frontmatter + body) used as system msg. */
+  agentBody?: string;
+  /** Optional live-stream callback fired as chunks arrive. */
+  onChunk?: (delta: string) => void;
+  cancellationToken?: vscode.CancellationToken;
+}
+
+export async function runStepAutonomously(
+  input: RunAutonomousStepInput
+): Promise<RunAutonomousStepResult> {
+  const model = await selectModel();
+  if (!model) return { kind: "no-model" };
+
+  const systemPreamble = [
+    `You are acting as the @${input.agentName} agent in a Copilot multi-agent ticket system.`,
+    `Follow the instructions defined in your agent definition below verbatim.`,
+    `Your response will be captured by the Agent Manager and forwarded to the next agent in the workflow,`,
+    `so produce a complete, self-contained response. Do NOT ask clarifying questions back \u2014 make the best`,
+    `decision you can with the information given and state your assumptions explicitly.`,
+    input.agentBody ? `\n## Agent definition (@${input.agentName})\n${input.agentBody.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const messages = [
+    vscode.LanguageModelChatMessage.User(`${systemPreamble}\n\n---\n\n${input.prompt}`),
+  ];
+
+  let raw = "";
+  try {
+    const response = await model.sendRequest(
+      messages,
+      {},
+      input.cancellationToken ?? new vscode.CancellationTokenSource().token
+    );
+    for await (const chunk of response.text) {
+      raw += chunk;
+      input.onChunk?.(chunk);
+    }
+  } catch (error) {
+    return { kind: "lm-error", error: error instanceof Error ? error.message : String(error) };
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) return { kind: "lm-error", error: "Empty response from language model." };
+  return { kind: "completed", output: trimmed };
+}
+
 // Exposed only for tests.
 export const __test__ = { tryParsePlannerJson, tryParseAnalysisJson, buildPlannerUserPrompt };

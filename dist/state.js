@@ -432,6 +432,27 @@ class AgentOpsStore {
         return normalized;
     }
     /**
+     * v1.3.0 — toggle whether a ticket is run autonomously through the LM API
+     * (no Copilot Chat paste required).
+     */
+    async setTicketAutonomousMode(ticketId, enabled) {
+        const tickets = this.getTickets();
+        const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+        if (ticketIndex < 0)
+            return undefined;
+        const ticket = { ...tickets[ticketIndex], autonomousMode: enabled };
+        ticket.updatedAt = new Date().toISOString();
+        const normalized = normalizeTicket(ticket);
+        tickets[ticketIndex] = normalized;
+        await this.context.workspaceState.update(TICKETS_KEY, tickets);
+        await this.recordEvent({
+            type: "ticket-autonomous-mode-toggled",
+            message: `${normalized.title} autonomous mode ${enabled ? "on" : "off"}`,
+            ticketId: normalized.id,
+        });
+        return normalized;
+    }
+    /**
      * Spawn a parallel side-chat lane on a ticket so a second agent can work in
      * its own chat tab without blocking the main sequential timeline.
      */

@@ -78,6 +78,14 @@ export interface AgentTicket {
    * automation toggle when undefined.
    */
   continuousMode?: boolean;
+  /**
+   * v1.3.0 — when true, `launchTicketStep` skips the Copilot Chat panel and
+   * runs the step directly through `vscode.lm.sendRequest`, capturing the full
+   * response and feeding it back into the manager pipeline automatically.
+   * Combined with `continuousMode` this drives a ticket end-to-end with no
+   * human paste.
+   */
+  autonomousMode?: boolean;
 }
 
 export interface ActivityEvent {
@@ -631,6 +639,31 @@ export class AgentOpsStore {
     await this.recordEvent({
       type: "ticket-continuous-mode-toggled",
       message: `${normalized.title} continuous mode ${enabled ? "on" : "off"}`,
+      ticketId: normalized.id,
+    });
+    return normalized;
+  }
+
+  /**
+   * v1.3.0 — toggle whether a ticket is run autonomously through the LM API
+   * (no Copilot Chat paste required).
+   */
+  async setTicketAutonomousMode(
+    ticketId: string,
+    enabled: boolean
+  ): Promise<AgentTicket | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const ticket = { ...tickets[ticketIndex], autonomousMode: enabled };
+    ticket.updatedAt = new Date().toISOString();
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-autonomous-mode-toggled",
+      message: `${normalized.title} autonomous mode ${enabled ? "on" : "off"}`,
       ticketId: normalized.id,
     });
     return normalized;
