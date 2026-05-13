@@ -1,7 +1,8 @@
-# Automation Model — Manual / Continuous / Parallel
+# Automation Model — Manual / Continuous / Autonomous / Parallel
 
-VS Code Agent Manager v1.1.0 supports three orthogonal automation modes per
-ticket. They can be combined freely.
+VS Code Agent Manager v1.3.0 supports four orthogonal automation modes per
+ticket. They can be combined freely. The combination of **Autonomous +
+Continuous** drives a ticket end-to-end with no human paste.
 
 ## 1. Manual (default for new tickets)
 
@@ -30,7 +31,25 @@ output yourself before the next agent sees it.
 Use this for repetitive multi-step pipelines where you trust the agent chain
 and just want to keep pasting outputs in sequence.
 
-## 3. Parallel Lanes (per ticket, any number)
+## 3. Autonomous Mode (per ticket, v1.3.0)
+
+- Toggle the **Autonomous mode** checkbox on the ticket card, or run
+  **Copilot Agents: Toggle Ticket Autonomous Mode**.
+- When ON, `launchTicketStep` skips Copilot Chat and instead calls
+  `vscode.lm.sendRequest` directly with the agent's `.agent.md` body as the
+  system message and the composed ticket query as the user message.
+- The full streamed response is captured and routed back through
+  `submitStepOutput`, so the LLM analyzer + LLM planner + hard output gate +
+  continuous-mode chaining all behave identically to the manual-paste path.
+- Combined with **Continuous mode**, a ticket runs end-to-end with no human
+  paste until the planner reports `done` (or until an error is surfaced).
+
+**Caveat:** the LM call bypasses chat-participant tools, so file edits,
+terminal runs, and other side-effecting tools are NOT executed. Use
+autonomous mode for analysis / planning / brainstorming / review steps; use
+the chat-paste flow for steps that need real tool actions.
+
+## 4. Parallel Lanes (per ticket, any number)
 
 - Click **Spawn Parallel** on a ticket card, or run
   **Copilot Agents: Spawn Parallel Agent Lane**.
@@ -47,12 +66,14 @@ ticket card.
 
 ## Mode interaction matrix
 
-| Main timeline | Lanes | Continuous Mode | Effect |
-|---|---|---|---|
-| Manual | None | Off | One step at a time, user-driven |
-| Manual | Many | Off | User-driven main + parallel side chats |
-| Continuous | None | On | Self-driving main timeline, gated on output capture |
-| Continuous | Many | On | Self-driving main + independent parallel lanes |
+| Main timeline | Lanes | Continuous Mode | Autonomous Mode | Effect |
+|---|---|---|---|---|
+| Manual | None | Off | Off | One step at a time, user-driven, chat-paste required |
+| Manual | Many | Off | Off | User-driven main + parallel side chats |
+| Continuous | None | On | Off | Self-driving main timeline, chat-paste required, gated on output capture |
+| Continuous | Many | On | Off | Self-driving main + independent parallel lanes |
+| Autonomous | None | Off | On | Each step runs via `vscode.lm`; output captured automatically; manager pauses for review between steps |
+| Autonomous + Continuous | None/Many | On | On | Fully hands-off: ticket runs end-to-end through `vscode.lm` until planner reports `done` |
 
 ## Output gating safety
 

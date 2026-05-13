@@ -1,24 +1,33 @@
-# Handover — VS Code Agent Manager v1.2.0 (post-compaction)
+# Handover — VS Code Agent Manager v1.3.0 (post-compaction)
 
 > Purpose: hand the conversation back to a fresh Copilot session after `/compact`. Read this first.
 
 ## Current ship state
 
 - Repo: `C:\Users\purpl\VS-Code-Agent-Manager` ↔ `https://github.com/BarnsL/VS-Code-Agent-Manager`.
-- Branch: `master`. HEAD: **`4717b3a`** (origin/master matches).
-- Version: `1.2.0` in `package.json`.
-- Last VSIX built/installed: `vs-code-agent-manager-1.2.0.vsix` (80.3 KB, 31 files).
+- Branch: `master`. HEAD: **`70ff24b`** (origin/master matches; pending docs commit on top).
+- Version: `1.3.0` in `package.json`.
+- Last VSIX built/installed: `vs-code-agent-manager-1.3.0.vsix` (85.35 KB, 32 files).
 - Build: `npm run compile` clean. Tests: `node --test dist/workflowAutomation.test.js` → 8/8 pass. No tests yet for `managerLlm.ts`.
 
 ## Recent commits (newest first)
 
 | SHA | Subject |
 |---|---|
+| `70ff24b` | feat(v1.3.0): autonomous mode runs steps via vscode.lm and auto-captures output |
 | `4717b3a` | fix: remove legacy 'estimated from Agent Manager launches' usage note |
 | `884c536` | feat(v1.2.0): LLM-driven manager, single-step planning, hard output gate |
 | `e34b5ef` | feat(v1.1.0): manager-mediated sequential flow, parallel lanes, agent reassignment |
 
-## v1.2.0 architecture (the things to remember)
+## v1.3.0 architecture additions
+
+- **Autonomous mode** per ticket. `AgentTicket.autonomousMode?: boolean` in `src/state.ts`; toggled via `setTicketAutonomousMode` and the new `copilot-agents.setAutonomousMode` command.
+- **`runStepAutonomously`** in `src/managerLlm.ts` calls `vscode.lm.sendRequest` with the agent's `.agent.md` body as the system message. Returns `{kind:'completed'|'no-model'|'lm-error'}`. Empty responses coerced to `lm-error`.
+- **`launchTicketStep`** branches on `autonomousMode`: if ON, records launch with source `ticket-workflow-autonomous`, runs `runStepAutonomously`, then routes the captured output through `submitStepOutput` so analyzer + planner + continuous-mode chaining behave identically to the manual paste path.
+- **Dashboard** has a second toggle next to Continuous mode; the textarea placeholder flips to an autonomous-aware copy when enabled.
+- Hard output gate, single-step planner, structured analyzer, and `skipStep` override from v1.2.0 are all preserved.
+
+## v1.2.0 architecture (still applies)
 
 1. **Single-step seeding.** `buildWorkflow` in `src/state.ts` queues only the LEAD step at ticket creation. Subsequent steps are appended dynamically by `appendDynamicStep` AFTER the prior step's chat output is captured.
 2. **LLM-driven manager.** New `src/managerLlm.ts`:

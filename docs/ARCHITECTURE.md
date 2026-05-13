@@ -1,19 +1,24 @@
-# Architecture — VS Code Agent Manager v1.1.0
+# Architecture — VS Code Agent Manager v1.3.0
 
 This document describes how the **manager-mediated workflow** is wired across
-the extension, the webview, and the persistent store. It is intentionally
-focused on the v1.1.0 change: every advance through a ticket's workflow is
-gated on the agent's actual chat output being captured and analyzed by the
-manager before the next agent's prompt is composed.
+the extension, the webview, and the persistent store. The v1.1.0 contract —
+every advance through a ticket's workflow is gated on the agent's actual chat
+output being captured and analyzed by the manager before the next agent's
+prompt is composed — still applies. v1.2.0 made the manager LLM-driven
+(single-step planning, structured analysis, hard output gate). v1.3.0 adds an
+opt-in **autonomous mode** where the manager calls the language model directly
+for each step instead of opening Copilot Chat, capturing the response and
+feeding it back through the same gate automatically.
 
 ## Components
 
 | Layer | File | Responsibility |
 |---|---|---|
-| Extension host | `src/extension.ts` | Command registration, chat orchestration, manager actions (`submitStepOutput`, `reassignStepAgent`, `spawnParallelLane`, `setContinuousMode`). |
-| Persistent store | `src/state.ts` | Strongly-typed ticket / step / lane model, snapshot derivation, store mutations. Backed by `vscode.Memento` (workspace state). |
-| Manager logic | `src/workflowAutomation.ts` | Pure helpers: `analyzeStepOutput`, `buildStructuredHandoffPrompt`, `getQueueActionLabel`, `shouldAutoProceedWorkflow`. |
-| Dashboard UI | `src/dashboardView.ts` | Webview HTML/CSS/JS for the kanban + per-step output capture + lanes + continuous-mode toggle. |
+| Extension host | `src/extension.ts` | Command registration, chat orchestration, manager actions (`submitStepOutput`, `reassignStepAgent`, `spawnParallelLane`, `setContinuousMode`, `setAutonomousMode`). v1.3.0: `launchTicketStep` branches on `ticket.autonomousMode` and routes through `runStepAutonomously` when enabled. |
+| Persistent store | `src/state.ts` | Strongly-typed ticket / step / lane model, snapshot derivation, store mutations. Backed by `vscode.Memento` (workspace state). v1.3.0 adds `autonomousMode` and `setTicketAutonomousMode`. |
+| Manager LLM | `src/managerLlm.ts` | v1.2.0: `planNextStep` and `analyzeStepOutputWithLm` over `vscode.lm`. v1.3.0: `runStepAutonomously` runs a single agent step end-to-end through the LM with the agent's `.agent.md` body as the system message. |
+| Manager helpers | `src/workflowAutomation.ts` | Pure helpers: `analyzeStepOutput`, `buildStructuredHandoffPrompt`, `getQueueActionLabel`, `shouldAutoProceedWorkflow`. Retained as the no-model fallback for the analyzer preview. |
+| Dashboard UI | `src/dashboardView.ts` | Webview HTML/CSS/JS for the kanban + per-step output capture + lanes + continuous-mode toggle + (v1.3.0) autonomous-mode toggle. |
 | Activity sidebar | `src/activityView.ts` | Tree view summarizing what each agent is doing right now. |
 | Discovery | `src/agents.ts` | Reads `.agent.md` files from user, workspace, and extension sources. |
 

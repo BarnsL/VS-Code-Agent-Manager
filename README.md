@@ -2,7 +2,11 @@
 
 A native VS Code extension that turns your Copilot agent files into a fully managed, **manager-mediated** control center — with sequential output-gated handoffs, parallel side-chat lanes, on-the-fly agent reassignment, a live dashboard, premium usage tracking, multi-agent ticket workflows, and one-click `@route` orchestration.
 
-> **v1.1.0 — Manager-Mediated Workflow.** The extension no longer fires chat queries blindly. Each step runs, you paste the chat output back into the ticket card, the manager analyzes it, and only then composes the next agent’s prompt with the prior output quoted verbatim. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/AUTOMATION-MODEL.md`](docs/AUTOMATION-MODEL.md).
+> **v1.3.0 — Autonomous Mode.** Each ticket now has an **Autonomous mode** toggle. When ON, the manager runs each step directly through `vscode.lm.sendRequest` (using the agent's `.agent.md` body as the system message), captures the full streamed response automatically, and feeds it straight back through the analyzer + planner. Combined with **Continuous mode**, a ticket runs end-to-end with zero human paste. See [`docs/CHANGELOG-1.3.0.md`](docs/CHANGELOG-1.3.0.md).
+>
+> **v1.2.0 — LLM-Driven Manager.** The manager uses the VS Code Language Model API to plan exactly ONE next step at a time and to compose tailored per-step instructions for each agent. The hard output gate refuses to mark any step done without captured chat output. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/AUTOMATION-MODEL.md`](docs/AUTOMATION-MODEL.md).
+>
+> **v1.1.0 — Manager-Mediated Workflow.** The extension no longer fires chat queries blindly. Each step runs, you paste the chat output back into the ticket card, the manager analyzes it, and only then composes the next agent's prompt with the prior output quoted verbatim.
 
 ---
 
@@ -105,10 +109,20 @@ Type `@route <task>` in Copilot Chat to instantly get a ranked list of agents fo
 
 ### Running a Ticket Step (Manager-Mediated)
 1. In the dashboard, click **Run Next Step** on any ticket
-2. The agent prompt opens in Copilot Chat with full context, prior chat output, and the manager’s prior analysis
-3. When the agent is done in chat, **paste its full response** into the ticket card’s output textarea and click **Submit Output + Analyze**
+2. The agent prompt opens in Copilot Chat with full context, prior chat output, and the manager's prior analysis
+3. When the agent is done in chat, **paste its full response** into the ticket card's output textarea and click **Submit Output + Analyze**
 4. The manager extracts a structured analysis and either pauses for your review (default) or auto-launches the next agent (when **Continuous mode** is on for that ticket)
 5. Use **Reassign Agent** on the active step to swap the assignee. Use **Spawn Parallel** to launch a side-chat lane that runs alongside the main timeline.
+
+### Running a Ticket Autonomously (v1.3.0)
+For agents that produce text deliverables (analysis, planning, brainstorming, review), you can let the manager drive the entire ticket without ever pasting into chat.
+
+1. On the ticket card, tick **Autonomous mode** (and tick **Continuous mode** if you want the chain to keep going).
+2. Click **Run Next Step** once.
+3. The manager calls `vscode.lm.sendRequest` directly with the agent's `.agent.md` body as the system message and the composed ticket query as the user message. The full streamed response is captured and submitted back through the same analyzer + planner pipeline used by the manual paste flow — so the hard output gate, structured analysis, and single-step planning all still apply.
+4. With Continuous mode also ON, the planned next step launches automatically and the loop continues until the planner reports `done`.
+
+**Caveat:** autonomous mode bypasses Copilot Chat participants, so chat-tool side effects (file edits, terminal commands, etc.) are NOT executed. Use the chat-paste flow for steps that need real tool actions; use autonomous mode for analysis / planning / brainstorming / review steps.
 
 ### Configuring Usage Tracking
 Command palette → **Copilot Agents: Configure Copilot Usage Tracking**  
@@ -136,6 +150,8 @@ Command palette → **Copilot Agents: New Agent** → choose a template (Debuggi
 | `Copilot Agents: Reassign Ticket Step Agent` | Swap the agent on the active or next queued step |
 | `Copilot Agents: Spawn Parallel Agent Lane` | Start a side-chat lane on a chosen agent in parallel with the main workflow |
 | `Copilot Agents: Toggle Ticket Continuous Mode` | Toggle whether submitted output auto-launches the next agent |
+| `Copilot Agents: Toggle Ticket Autonomous Mode` | Toggle whether steps run via `vscode.lm` (no chat paste) |
+| `Copilot Agents: Skip Active Ticket Step (Override)` | Bypass the hard output gate on the active step — reason required |
 | `Copilot Agents: Advance Ticket (Manager-Mediated)` | Backwards-compatible single structured advance (replaces v1.0 Auto-Drive) |
 | `Copilot Agents: Seed Required Feature Tickets` | Create roadmap tickets for auto-assignment, chat orchestration, and completion-driven lifecycle |
 | `Copilot Agents: Configure Copilot Usage Tracking` | Set plan and seed baseline usage |
