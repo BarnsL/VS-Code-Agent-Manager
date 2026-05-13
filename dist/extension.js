@@ -45,6 +45,7 @@ const activityView_1 = require("./activityView");
 const state_1 = require("./state");
 const roadmap_1 = require("./roadmap");
 const workflowAutomation_1 = require("./workflowAutomation");
+const managerLlm_1 = require("./managerLlm");
 // ─── Agent Creation Templates ─────────────────────────────────────────────────
 const TEMPLATES = {
     debugging: (name) => `---
@@ -237,8 +238,12 @@ async function focusAgentManager() {
 // Build the chat prompt that the manager sends to the active agent. The
 // prompt embeds every prior step’s verbatim chat output and the manager’s
 // structured analysis so the next agent always works from the actual
-// deliverables instead of a synthesized one-liner. This is the core of the
-// v1.1.0 manager-mediated workflow.
+// deliverables instead of a synthesized one-liner.
+//
+// v1.2.0: when the step has a tailored `prompt` produced by the LLM-driven
+// planner, that custom instruction set is appended to the structured handoff
+// so each agent gets BOTH the prior chain context AND the manager's specific
+// directives for this step.
 function buildTicketQuery(ticket, step) {
     const priorSteps = ticket.steps
         .filter((candidate) => candidate.status === "done")
@@ -249,7 +254,7 @@ function buildTicketQuery(ticket, step) {
         output: candidate.output,
         analysis: candidate.analysis,
     }));
-    return (0, workflowAutomation_1.buildStructuredHandoffPrompt)({
+    const structured = (0, workflowAutomation_1.buildStructuredHandoffPrompt)({
         ticketTitle: ticket.title,
         workspaceLabel: ticket.workspaceLabel,
         originalRequest: ticket.prompt,
@@ -257,6 +262,13 @@ function buildTicketQuery(ticket, step) {
         currentStepTitle: step.title,
         currentAgentName: step.agentName,
     });
+    // The seed step's `prompt` is the original ticket request and is already
+    // included in the structured handoff above; only LLM-tailored prompts (which
+    // differ from the ticket prompt) need to be appended as custom instructions.
+    const tailored = step.prompt && step.prompt.trim() && step.prompt.trim() !== ticket.prompt.trim()
+        ? `\n\n## Manager's tailored instructions for this step\n\n${step.prompt.trim()}`
+        : "";
+    return `${structured}${tailored}`;
 }
 function pickTicketLabel(ticket) {
     const next = ticket.nextAgentName ? `@${ticket.nextAgentName}` : "complete";
@@ -556,20 +568,23 @@ function activate(context) {
         });
         refreshAll();
     }
-    // v1.1.0 — manager-mediated single-step advance.
+    // v1.2.0 — LLM-driven manager-mediated single-step advance.
     //
-    // Capture the chat output from the currently active step, run a local
-    // analysis, persist both on the step, and (only when the ticket is in
-    // continuous mode) compose+launch the next step’s prompt with that output
-    // quoted verbatim. This replaces the old blind `while` loop that fired
-    // chat queries without ever inspecting agent output.
+    // Sequence:
+    //  1. Capture the chat output from the currently active step (REQUIRED — we
+    //     never advance without it).
+    //  2. Ask the Copilot LM to produce a structured analysis of that output.
+    //  3. Mark the step done, persisting the verbatim output + analysis.
+    //  4. Ask the LM planner to decide ONE next step (agent + tailored prompt)
+    //     OR declare the workflow done. We never queue more than one step ahead.
+    //  5. Append the planned step. If continuous mode is on, launch it.
     async function submitStepOutput(ticketId, rawOutput) {
         const ticket = opsStore.findTicket(ticketId);
         if (!ticket) {
             vscode.window.showInformationMessage("Ticket not found.");
             return;
         }
-        const active = ticket.steps.find((step) => step.status === "active");
+        const active = ticket.steps.find((step) => step.status === "active" || step.status === "awaiting-output");
         if (!active) {
             vscode.window.showInformationMessage("There’s no active step waiting for output. Run the next step first.");
             return;
@@ -579,39 +594,92 @@ function activate(context) {
             vscode.window.showWarningMessage("Paste the chat output for this step before submitting — the manager needs it to compose the next prompt.");
             return;
         }
-        const nextQueuedStep = ticket.steps.find((step) => step.status === "queued");
-        const analysis = (0, workflowAutomation_1.analyzeStepOutput)({
+        // Step 2 — LLM analysis with heuristic fallback ONLY for the analysis
+        // preview (planning still requires the LM and bails out cleanly otherwise).
+        let analysisMarkdown;
+        let analysisHeadline;
+        const lmAnalysis = await (0, managerLlm_1.analyzeStepOutputWithLm)({
             output,
             stepTitle: active.title,
             agentName: active.agentName,
-            nextAgentName: nextQueuedStep?.agentName,
-            nextStepTitle: nextQueuedStep?.title,
         });
-        // Mark the step awaiting-output and store the analysis so the dashboard
-        // can render it as a preview before the user confirms continuous advance.
+        if (lmAnalysis.kind === "analyzed") {
+            analysisMarkdown = (0, managerLlm_1.formatAnalysisAsMarkdown)(lmAnalysis.analysis);
+            analysisHeadline = lmAnalysis.analysis.headline;
+        }
+        else {
+            const fallback = (0, workflowAutomation_1.analyzeStepOutput)({
+                output,
+                stepTitle: active.title,
+                agentName: active.agentName,
+            });
+            analysisMarkdown = fallback.fullText;
+            analysisHeadline = fallback.headline;
+        }
         await opsStore.markStepAwaitingOutput(ticket.id, {
             output,
-            analysis: analysis.fullText,
+            analysis: analysisMarkdown,
         });
         const summary = (0, workflowAutomation_1.buildAutomaticHandoffSummary)({
             stepTitle: active.title,
             agentName: active.agentName,
-            nextAgentName: nextQueuedStep?.agentName,
-            workflowResult: analysis.headline,
+            workflowResult: analysisHeadline,
         });
         await opsStore.completeActiveStep(ticket.id, summary, {
             output,
-            analysis: analysis.fullText,
+            analysis: analysisMarkdown,
+        });
+        // Step 4 — ask the LM planner for the next single step, using the
+        // freshly-completed ticket snapshot so prior outputs are included.
+        const refreshed = opsStore.findTicket(ticket.id) ?? ticket;
+        const priorRecords = refreshed.steps
+            .filter((step) => step.status === "done")
+            .map((step) => ({
+            title: step.title,
+            agentName: step.agentName,
+            output: step.output,
+            summary: step.summary,
+        }));
+        const availableAgents = tree.getAll().map((agent) => ({
+            name: agent.name,
+            description: agent.description,
+        }));
+        const plan = await (0, managerLlm_1.planNextStep)({
+            originalRequest: refreshed.prompt,
+            ticketTitle: refreshed.title,
+            workspaceLabel: refreshed.workspaceLabel,
+            availableAgents,
+            priorSteps: priorRecords,
         });
         refreshAll();
-        if (ticket.continuousMode && nextQueuedStep) {
+        if (plan.kind === "done") {
+            vscode.window.showInformationMessage(`Workflow complete for ticket ${refreshed.title}.${plan.rationale ? ` Manager: ${plan.rationale}` : ""}`);
+            return;
+        }
+        if (plan.kind === "no-model") {
+            vscode.window.showWarningMessage("Step output captured, but no Copilot language model is available to plan the next step. Use Reassign / Spawn Lane to drive manually, or sign in to Copilot Chat.");
+            return;
+        }
+        if (plan.kind === "lm-error") {
+            vscode.window.showErrorMessage(`Manager LM call failed: ${plan.error}. Step output is saved — retry from the dashboard when ready.`);
+            return;
+        }
+        if (plan.kind === "parse-error") {
+            vscode.window.showWarningMessage("Manager LM returned a non-JSON response; next step not planned. You can re-run the step or override manually.");
+            return;
+        }
+        // plan.kind === "planned"
+        await opsStore.appendDynamicStep(ticket.id, {
+            agentName: plan.step.agentName,
+            title: plan.step.stepTitle ?? plan.step.agentName,
+            prompt: plan.step.customPrompt,
+        });
+        refreshAll();
+        if (refreshed.continuousMode) {
             await launchTicketStep(ticket.id);
         }
-        else if (nextQueuedStep) {
-            vscode.window.showInformationMessage(`Step complete. Manager analysis stored. Click “Run Next Step” when you’re ready to launch @${nextQueuedStep.agentName}.`);
-        }
         else {
-            vscode.window.showInformationMessage(`Workflow complete for ticket ${ticket.title}.`);
+            vscode.window.showInformationMessage(`Manager queued next step: ${plan.step.stepTitle ?? plan.step.agentName} (@${plan.step.agentName}). Click “Run Next Step” when ready.`);
         }
     }
     async function reassignStepAgent(ticketId, stepId, explicitAgent) {
@@ -680,42 +748,47 @@ function activate(context) {
             ? "Continuous mode ON — each submitted output will auto-launch the next agent."
             : "Continuous mode OFF — manager will pause between agents for your review.");
     }
-    // Manual completion path. Used when the user wants to mark a step done
-    // without going through the structured submit-output flow (e.g. they
-    // resolved the work outside the chat). Continuous-mode advance is gated on
-    // the presence of a workflowResult — we never silently fire the next
-    // agent without something to forward.
+    // v1.2.0 — manual completion is no longer a silent shortcut. The manager
+    // refuses to mark a step done without captured chat output. Callers must
+    // either route through `submitStepOutput` (with the actual chat response)
+    // or use the explicit skip override below.
     async function completeTicketStep(ticketId, workflowResult) {
         const ticket = opsStore.findTicket(ticketId);
         if (!ticket) {
             vscode.window.showInformationMessage("Ticket not found.");
             return;
         }
-        const active = ticket.steps.find((step) => step.status === "active");
+        const active = ticket.steps.find((step) => step.status === "active" || step.status === "awaiting-output");
         if (!active) {
             vscode.window.showInformationMessage("No active step is running for that ticket.");
             return;
         }
-        // If the caller passed structured output, route through the manager so
-        // the analysis + verbatim quoting still happen.
         if (workflowResult && workflowResult.trim()) {
             await submitStepOutput(ticket.id, workflowResult);
             return;
         }
-        const summary = await vscode.window.showInputBox({
-            prompt: `Handoff summary for ${active.title} (@${active.agentName})`,
-            placeHolder: "Summarize what changed, what remains, and what the next agent should verify.",
-            validateInput: (value) => value.trim() ? null : "A handoff summary keeps the next agent aligned",
-        });
-        if (!summary)
+        vscode.window.showWarningMessage("Paste the chat output via 'Submit Output + Advance'. The manager will not mark a step done without it. Use 'Skip Step (Override)' if you really want to bypass.");
+    }
+    // Explicit override — only invoked when the user runs the Skip Step command.
+    async function skipTicketStep(ticketId) {
+        const ticket = opsStore.findTicket(ticketId);
+        if (!ticket)
             return;
-        await opsStore.completeActiveStep(ticket.id, summary, {});
-        refreshAll();
-        if (ticket.continuousMode) {
-            const hasNext = ticket.steps.some((step) => step.status === "queued");
-            if (hasNext)
-                await launchTicketStep(ticket.id);
+        const active = ticket.steps.find((step) => step.status === "active" || step.status === "awaiting-output");
+        if (!active) {
+            vscode.window.showInformationMessage("No active step to skip.");
+            return;
         }
+        const reason = await vscode.window.showInputBox({
+            prompt: `Skip ${active.title} (@${active.agentName}) without captured output?`,
+            placeHolder: "Reason for skipping (recorded on the step summary)",
+            validateInput: (value) => (value.trim() ? null : "Provide a reason so the next agent has context."),
+        });
+        if (!reason)
+            return;
+        await opsStore.completeActiveStep(ticket.id, `[skipped] ${reason.trim()}`, {});
+        refreshAll();
+        vscode.window.showInformationMessage(`Skipped ${active.title}. The manager will NOT auto-plan the next step until you run it.`);
     }
     // ── File Watcher ────────────────────────────────────────────────────────────
     const watcher = vscode.workspace.createFileSystemWatcher("**/*.agent.md");
@@ -819,6 +892,15 @@ function activate(context) {
         if (typeof value !== "boolean")
             return;
         await setContinuousMode(ticket.id, value);
+    }));
+    // v1.2.0 — explicit override for marking a step done without captured output.
+    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.skipStep", async (ticketId) => {
+        const ticket = ticketId
+            ? opsStore.findTicket(ticketId)
+            : await pickTicket((candidate) => candidate.steps.some((step) => step.status === "active" || step.status === "awaiting-output"));
+        if (!ticket)
+            return;
+        await skipTicketStep(ticket.id);
     }));
     context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.configureUsage", async () => {
         await configureUsage();

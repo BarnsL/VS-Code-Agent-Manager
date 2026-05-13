@@ -320,38 +320,25 @@ function normalizeWorkflowAutomation(
   };
 }
 
+// v1.2.0 — single-seed-step planning. The manager no longer pre-queues an
+// entire pipeline up front. Only the LEAD step is enqueued at ticket
+// creation; subsequent steps are appended dynamically by `planNextStep`
+// (see managerLlm.ts) AFTER the prior step's chat output is captured. This
+// fixes the "queues everything at once and marks done immediately" bug.
 function buildWorkflow(prompt: string, routeResults: RouteResult[]): WorkflowStep[] {
   const recommendedAgents = dedupeAgents(routeResults.map((result) => result.agentName));
   const leadAgent = recommendedAgents[0] ?? "brainstorming";
-  const preset = WORKFLOW_PRESETS[leadAgent] ?? [
-    { title: humanizeAgentName(leadAgent), agentName: leadAgent },
+  const preset = WORKFLOW_PRESETS[leadAgent];
+  const lead = preset?.[0] ?? { title: humanizeAgentName(leadAgent), agentName: leadAgent };
+  return [
+    {
+      id: makeId("step"),
+      title: lead.title,
+      agentName: lead.agentName,
+      status: "queued",
+      prompt,
+    },
   ];
-
-  const appended = recommendedAgents
-    .filter((agentName) => !preset.some((step) => step.agentName === agentName))
-    .slice(0, 2)
-    .map((agentName, index) => ({
-      title: index === 0 ? "Support" : "Follow-up",
-      agentName,
-    }));
-
-  const workflow = [...preset, ...appended];
-  if (!workflow.some((step) => step.agentName === "verification-before-completion")) {
-    workflow.push({ title: "Verify", agentName: "verification-before-completion" });
-  }
-
-  const deduped = dedupeAgents(workflow.map((step) => step.agentName)).map((agentName) => {
-    const match = workflow.find((step) => step.agentName === agentName);
-    return match ?? { title: humanizeAgentName(agentName), agentName };
-  });
-
-  return deduped.slice(0, 5).map((step) => ({
-    id: makeId("step"),
-    title: step.title,
-    agentName: step.agentName,
-    status: "queued",
-    prompt,
-  }));
 }
 
 export class AgentOpsStore {
@@ -579,6 +566,42 @@ export class AgentOpsStore {
       message: `${normalized.title} reassigned ${normalized.steps[stepIndex].title}: @${previousAgent} -> @${trimmed}`,
       ticketId: normalized.id,
       agentName: trimmed,
+    });
+    return normalized;
+  }
+
+  /**
+   * v1.2.0 — append a dynamically-planned next step. Called by the LLM-driven
+   * manager after the prior step's chat output is captured + analyzed. The
+   * tailored `prompt` becomes the per-step custom instruction set the next
+   * agent receives (in addition to the structured handoff context).
+   */
+  async appendDynamicStep(
+    ticketId: string,
+    input: { agentName: string; title: string; prompt: string }
+  ): Promise<AgentTicket | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const ticket = { ...tickets[ticketIndex], steps: tickets[ticketIndex].steps.map((step) => ({ ...step })) };
+    ticket.steps.push({
+      id: makeId("step"),
+      title: input.title.trim() || humanizeAgentName(input.agentName),
+      agentName: input.agentName,
+      status: "queued",
+      prompt: input.prompt,
+    });
+    ticket.updatedAt = new Date().toISOString();
+
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-step-planned",
+      message: `${normalized.title} planned next step: ${input.title} (@${input.agentName})`,
+      ticketId: normalized.id,
+      agentName: input.agentName,
     });
     return normalized;
   }
