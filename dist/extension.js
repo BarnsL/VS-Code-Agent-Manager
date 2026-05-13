@@ -274,6 +274,40 @@ function pickTicketLabel(ticket) {
     const next = ticket.nextAgentName ? `@${ticket.nextAgentName}` : "complete";
     return `${ticket.title} · ${ticket.status} · ${next}`;
 }
+function requestLikelyNeedsArtifacts(prompt) {
+    const text = prompt.toLowerCase();
+    const implementationSignals = /(build|create|scaffold|implement|fix|refactor|code|app|component|api|endpoint|test)/.test(text);
+    const nonArtifactSignals = /(brainstorm|research|analyze|analysis|plan|planning|review|summary)/.test(text);
+    return implementationSignals && !nonArtifactSignals;
+}
+function extractArtifactPathsFromAnalysis(analysis) {
+    if (!analysis)
+        return [];
+    const matches = analysis.match(/`([^`\n]+)`/g) ?? [];
+    return matches
+        .map((raw) => raw.replace(/^`|`$/g, "").trim())
+        .filter((item) => item.length > 0);
+}
+function hasConcreteArtifactEvidence(ticket) {
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    const paths = ticket.steps
+        .filter((step) => step.status === "done")
+        .flatMap((step) => extractArtifactPathsFromAnalysis(step.analysis));
+    if (paths.length === 0)
+        return false;
+    for (const candidate of paths) {
+        const normalized = candidate.replace(/^\.\//, "");
+        for (const folder of workspaceFolders) {
+            const resolved = path.isAbsolute(normalized)
+                ? normalized
+                : path.join(folder.uri.fsPath, normalized);
+            if (fs.existsSync(resolved)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 // ─── Activation ───────────────────────────────────────────────────────────────
 function activate(context) {
     // ── Tree Provider & View ────────────────────────────────────────────────────
@@ -674,6 +708,7 @@ function activate(context) {
             agentName: step.agentName,
             output: step.output,
             summary: step.summary,
+            analysis: step.analysis,
         }));
         const availableAgents = tree.getAll().map((agent) => ({
             name: agent.name,
@@ -688,6 +723,24 @@ function activate(context) {
         });
         refreshAll();
         if (plan.kind === "done") {
+            const needsArtifacts = requestLikelyNeedsArtifacts(refreshed.prompt);
+            const hasEvidence = hasConcreteArtifactEvidence(refreshed);
+            if (needsArtifacts && !hasEvidence) {
+                const verifier = tree.byName("verification-before-completion")?.name ??
+                    tree.byName("maintainer")?.name ??
+                    active.agentName;
+                await opsStore.appendDynamicStep(ticket.id, {
+                    agentName: verifier,
+                    title: "Completion Evidence Check",
+                    prompt: `@${verifier}\nBefore this ticket can be marked done, provide concrete evidence of produced artifacts in the workspace.\n\nRequired:\n- List exact file paths that were created/updated.\n- Summarize what each file now contains.\n- Include build/test command output if relevant.\n- If nothing was produced yet, execute the missing implementation now and then report evidence.\n\nPaste your full response back into the Agent Manager queue when finished.`,
+                });
+                refreshAll();
+                vscode.window.showWarningMessage("Manager blocked auto-completion: implementation-style request had no concrete artifact evidence. Added a Completion Evidence Check step.");
+                if (refreshed.continuousMode) {
+                    await launchTicketStep(ticket.id);
+                }
+                return;
+            }
             vscode.window.showInformationMessage(`Workflow complete for ticket ${refreshed.title}.${plan.rationale ? ` Manager: ${plan.rationale}` : ""}`);
             return;
         }

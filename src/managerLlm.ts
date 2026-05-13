@@ -18,6 +18,7 @@ export interface PriorStepRecord {
   agentName: string;
   output?: string;
   summary?: string;
+  analysis?: string;
 }
 
 export interface PlannedNextStep {
@@ -47,6 +48,9 @@ Hard rules:
 - Respect each agent's specialty. Pick the most appropriate available agent.
 - Set done=true only when the original request is fully and verifiably satisfied
   by prior outputs (including verification, if relevant). Otherwise done=false.
+- Never return done=true if the request is implementation-heavy (build/create/
+  scaffold/fix/refactor/code changes) unless prior outputs include concrete
+  repository artifacts (file paths, test/build results, or verification steps).
 - customPrompt MUST start with "@<agentName>" on its own line and end with a
   clear request for the agent to paste its full response back into the Agent
   Manager queue when finished.
@@ -79,6 +83,9 @@ function buildPlannerUserPrompt(input: {
         .map((step, index) => {
           const out = step.output?.trim() || "(no captured output)";
           const truncated = out.length > 6000 ? `${out.slice(0, 6000)}\n... [truncated]` : out;
+          const analysis = step.analysis?.trim() || "";
+          const truncatedAnalysis =
+            analysis.length > 3000 ? `${analysis.slice(0, 3000)}\n... [truncated]` : analysis;
           return [
             `### Prior step ${index + 1}: ${step.title} (@${step.agentName})`,
             step.summary ? `Summary: ${step.summary}` : "",
@@ -86,6 +93,7 @@ function buildPlannerUserPrompt(input: {
             "```",
             truncated,
             "```",
+            truncatedAnalysis ? `Manager analysis:\n${truncatedAnalysis}` : "",
           ]
             .filter(Boolean)
             .join("\n");

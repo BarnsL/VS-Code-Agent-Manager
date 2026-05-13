@@ -2,7 +2,7 @@
   "name": "vs-code-agent-manager",
   "displayName": "VS Code Agent Manager",
   "description": "LLM-driven manager for VS Code Copilot agents — single-step planning, output-gated handoffs, tailored per-step prompts, autonomous LM execution, parallel lanes, agent reassignment, premium-usage tracking and ticket workflows.",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "publisher": "vs-code-agent-manager",
   "license": "MIT",
   "repository": {
