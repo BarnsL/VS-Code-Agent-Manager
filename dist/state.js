@@ -17,7 +17,7 @@ const DEFAULT_USAGE = {
     estimatedUsedPremium: 0,
     estimatedTokenUnits: 0,
     trackingMode: "estimated",
-    dataSourceNote: "Estimated from Agent Manager launches. GitHub does not currently expose live per-user premium balance to VS Code extensions.",
+    dataSourceNote: "",
 };
 const STATUS_ORDER = [
     "new",
@@ -151,10 +151,17 @@ function normalizeTicket(ticket) {
     };
 }
 function normalizeUsage(usage) {
-    return {
+    const merged = {
         ...DEFAULT_USAGE,
         ...usage,
     };
+    // v1.2.0: drop the legacy data-source disclaimer if it was previously
+    // persisted to globalState by an older install.
+    if (merged.dataSourceNote ===
+        "Estimated from Agent Manager launches. GitHub does not currently expose live per-user premium balance to VS Code extensions.") {
+        merged.dataSourceNote = "";
+    }
+    return merged;
 }
 function normalizeWorkflowAutomation(workflowAutomation) {
     return {

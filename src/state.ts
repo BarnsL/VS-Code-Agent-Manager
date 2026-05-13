@@ -154,8 +154,7 @@ const DEFAULT_USAGE: CopilotUsageState = {
   estimatedUsedPremium: 0,
   estimatedTokenUnits: 0,
   trackingMode: "estimated",
-  dataSourceNote:
-    "Estimated from Agent Manager launches. GitHub does not currently expose live per-user premium balance to VS Code extensions.",
+  dataSourceNote: "",
 };
 
 const STATUS_ORDER: TicketStatus[] = [
@@ -305,10 +304,19 @@ function normalizeTicket(ticket: AgentTicket): AgentTicket {
 }
 
 function normalizeUsage(usage: Partial<CopilotUsageState> | undefined): CopilotUsageState {
-  return {
+  const merged = {
     ...DEFAULT_USAGE,
     ...usage,
   };
+  // v1.2.0: drop the legacy data-source disclaimer if it was previously
+  // persisted to globalState by an older install.
+  if (
+    merged.dataSourceNote ===
+    "Estimated from Agent Manager launches. GitHub does not currently expose live per-user premium balance to VS Code extensions."
+  ) {
+    merged.dataSourceNote = "";
+  }
+  return merged;
 }
 
 function normalizeWorkflowAutomation(

@@ -858,7 +858,7 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
             <span class="ticket-meta">estimated prompt tokens</span>
           </div>
         </div>
-        <div class="usage-note">${escapeHtml(snapshot.usage.dataSourceNote)}</div>
+        ${snapshot.usage.dataSourceNote ? `<div class="usage-note">${escapeHtml(snapshot.usage.dataSourceNote)}</div>` : ""}
       </article>
 
       <article class="panel">
