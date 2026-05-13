@@ -2,6 +2,8 @@
 
 A native VS Code extension that turns your Copilot agent files into a fully managed, **manager-mediated** control center — with sequential output-gated handoffs, parallel side-chat lanes, on-the-fly agent reassignment, a live dashboard, premium usage tracking, multi-agent ticket workflows, and one-click `@route` orchestration.
 
+> **v1.3.2 — Grounded Routing + Planner Sanity Checks.** Ticket creation now routes against the actual discovered agents in your environment instead of relying on hardcoded canonical names, and the next-step planner now rejects off-task assignments that are not grounded in the original request or prior outputs. When a drifted plan is detected, the manager queues a **Re-scope Next Step** review instead of accepting the hallucinated assignment.
+>
 > **v1.3.1 — Completion Evidence Guard.** Implementation-heavy tickets no longer auto-close from narrative-only autonomous output. If the planner returns `done=true` but no concrete artifact evidence exists (real file paths from prior step analysis that exist in the workspace), the manager inserts a **Completion Evidence Check** step instead of completing the ticket.
 >
 > **v1.3.0 — Autonomous Mode.** Each ticket now has an **Autonomous mode** toggle. When ON, the manager runs each step directly through `vscode.lm.sendRequest` (using the agent's `.agent.md` body as the system message), captures the full streamed response automatically, and feeds it straight back through the analyzer + planner. Combined with **Continuous mode**, a ticket runs end-to-end with zero human paste. See [`docs/CHANGELOG-1.3.0.md`](docs/CHANGELOG-1.3.0.md).

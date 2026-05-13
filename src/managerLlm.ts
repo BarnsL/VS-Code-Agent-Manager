@@ -12,6 +12,7 @@
 // The manager never queues more than one step ahead of itself.
 
 import * as vscode from "vscode";
+import { resolveAgentNameForTask } from "./agents";
 
 export interface PriorStepRecord {
   title: string;
@@ -177,8 +178,75 @@ export type PlanNextStepResult =
   | { kind: "planned"; step: PlannedNextStep }
   | { kind: "done"; rationale?: string }
   | { kind: "no-model" }
+  | { kind: "invalid-plan"; reason: string; rawText: string }
   | { kind: "parse-error"; rawText: string }
   | { kind: "lm-error"; error: string };
+
+const GROUNDING_STOPWORDS = new Set([
+  "about",
+  "after",
+  "agent",
+  "agents",
+  "build",
+  "check",
+  "create",
+  "current",
+  "done",
+  "full",
+  "have",
+  "into",
+  "manager",
+  "more",
+  "next",
+  "only",
+  "output",
+  "paste",
+  "prior",
+  "request",
+  "response",
+  "step",
+  "steps",
+  "task",
+  "that",
+  "their",
+  "then",
+  "this",
+  "ticket",
+  "when",
+  "with",
+  "workflow",
+]);
+
+function extractGroundingTokens(text: string): string[] {
+  const matches = text.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? [];
+  return Array.from(new Set(matches.filter((token) => !GROUNDING_STOPWORDS.has(token))));
+}
+
+function ensureAgentMention(prompt: string, agentName: string): string {
+  const trimmed = prompt.trim();
+  if (!trimmed) return `@${agentName}`;
+  return trimmed.replace(/^@[\w-]+/, `@${agentName}`);
+}
+
+function isPlanGrounded(input: PlanNextStepInput, step: PlannedNextStep): boolean {
+  const groundingText = [
+    input.originalRequest,
+    input.ticketTitle,
+    ...input.priorSteps.flatMap((prior) => [
+      prior.title,
+      prior.summary ?? "",
+      prior.output ?? "",
+      prior.analysis ?? "",
+    ]),
+  ].join("\n");
+  const groundingTokens = new Set(extractGroundingTokens(groundingText));
+  if (groundingTokens.size === 0) return true;
+
+  const proposalTokens = extractGroundingTokens(
+    `${step.stepTitle ?? ""}\n${step.customPrompt ?? ""}`
+  );
+  return proposalTokens.some((token) => groundingTokens.has(token));
+}
 
 /**
  * Ask the Copilot LM to decide the single next step. Returns a discriminated
@@ -210,7 +278,28 @@ export async function planNextStep(input: PlanNextStepInput): Promise<PlanNextSt
   const parsed = tryParsePlannerJson(raw);
   if (!parsed) return { kind: "parse-error", rawText: raw };
   if (parsed.done) return { kind: "done", rationale: parsed.rationale };
-  return { kind: "planned", step: parsed };
+
+  const resolvedAgent = resolveAgentNameForTask(
+    parsed.agentName ?? "",
+    `${input.originalRequest}\n${parsed.customPrompt ?? ""}`,
+    input.availableAgents
+  );
+  const normalized: PlannedNextStep = {
+    ...parsed,
+    agentName: resolvedAgent,
+    stepTitle: parsed.stepTitle?.trim() || resolvedAgent,
+    customPrompt: ensureAgentMention(parsed.customPrompt ?? `@${resolvedAgent}`, resolvedAgent),
+  };
+
+  if (!isPlanGrounded(input, normalized)) {
+    return {
+      kind: "invalid-plan",
+      reason: "Planner proposed a next step that is not grounded in the ticket request or prior outputs.",
+      rawText: raw,
+    };
+  }
+
+  return { kind: "planned", step: normalized };
 }
 
 /**

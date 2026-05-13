@@ -51,6 +51,7 @@ exports.analyzeStepOutputWithLm = analyzeStepOutputWithLm;
 exports.formatAnalysisAsMarkdown = formatAnalysisAsMarkdown;
 exports.runStepAutonomously = runStepAutonomously;
 const vscode = __importStar(require("vscode"));
+const agents_1 = require("./agents");
 const PLANNER_SYSTEM = `You are the Agent Manager for a Copilot multi-agent ticket system.
 Given an original user request, the available specialist agents, and the FULL
 verbatim chat output of every prior step, decide whether the workflow is done
@@ -174,6 +175,67 @@ async function selectModel() {
         return undefined;
     }
 }
+const GROUNDING_STOPWORDS = new Set([
+    "about",
+    "after",
+    "agent",
+    "agents",
+    "build",
+    "check",
+    "create",
+    "current",
+    "done",
+    "full",
+    "have",
+    "into",
+    "manager",
+    "more",
+    "next",
+    "only",
+    "output",
+    "paste",
+    "prior",
+    "request",
+    "response",
+    "step",
+    "steps",
+    "task",
+    "that",
+    "their",
+    "then",
+    "this",
+    "ticket",
+    "when",
+    "with",
+    "workflow",
+]);
+function extractGroundingTokens(text) {
+    const matches = text.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? [];
+    return Array.from(new Set(matches.filter((token) => !GROUNDING_STOPWORDS.has(token))));
+}
+function ensureAgentMention(prompt, agentName) {
+    const trimmed = prompt.trim();
+    if (!trimmed)
+        return `@${agentName}`;
+    return trimmed.replace(/^@[\w-]+/, `@${agentName}`);
+}
+function isPlanGrounded(input, step) {
+    const groundingText = [
+        input.originalRequest,
+        input.ticketTitle,
+        ...input.priorSteps.flatMap((prior) => [
+            prior.title,
+            prior.summary ?? "",
+            prior.output ?? "",
+            prior.analysis ?? "",
+        ]),
+    ].join("\n");
+    const groundingTokens = new Set(extractGroundingTokens(groundingText));
+    if (groundingTokens.size === 0)
+        return true;
+    const proposalTokens = extractGroundingTokens(`${step.stepTitle ?? ""}\n${step.customPrompt ?? ""}`);
+    return proposalTokens.some((token) => groundingTokens.has(token));
+}
 /**
  * Ask the Copilot LM to decide the single next step. Returns a discriminated
  * result so the caller can surface clear UI when no model is available
@@ -201,7 +263,21 @@ async function planNextStep(input) {
         return { kind: "parse-error", rawText: raw };
     if (parsed.done)
         return { kind: "done", rationale: parsed.rationale };
-    return { kind: "planned", step: parsed };
+    const resolvedAgent = (0, agents_1.resolveAgentNameForTask)(parsed.agentName ?? "", `${input.originalRequest}\n${parsed.customPrompt ?? ""}`, input.availableAgents);
+    const normalized = {
+        ...parsed,
+        agentName: resolvedAgent,
+        stepTitle: parsed.stepTitle?.trim() || resolvedAgent,
+        customPrompt: ensureAgentMention(parsed.customPrompt ?? `@${resolvedAgent}`, resolvedAgent),
+    };
+    if (!isPlanGrounded(input, normalized)) {
+        return {
+            kind: "invalid-plan",
+            reason: "Planner proposed a next step that is not grounded in the ticket request or prior outputs.",
+            rawText: raw,
+        };
+    }
+    return { kind: "planned", step: normalized };
 }
 const ANALYZER_SYSTEM = `You are the Agent Manager analyzing a single agent's chat output.
 Extract a short structured summary so the next agent can build on it.

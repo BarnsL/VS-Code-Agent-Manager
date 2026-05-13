@@ -1,7 +1,14 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
-import { AgentInfo, AgentSource, USER_PROMPTS_DIR, discoverAllAgents, routeTask } from "./agents";
+import {
+  AgentInfo,
+  AgentSource,
+  USER_PROMPTS_DIR,
+  discoverAllAgents,
+  resolveAgentNameForTask,
+  routeTask,
+} from "./agents";
 import { AgentTreeProvider, AgentLeafItem } from "./treeView";
 import { AgentDashboardViewProvider } from "./dashboardView";
 import { AgentActivityProvider } from "./activityView";
@@ -274,6 +281,13 @@ function pickTicketLabel(ticket: AgentTicket): string {
   return `${ticket.title} · ${ticket.status} · ${next}`;
 }
 
+function routeTaskAgainstAvailableAgents(prompt: string, agents: AgentInfo[]) {
+  return routeTask(
+    prompt,
+    agents.map((agent) => ({ name: agent.name, description: agent.description }))
+  );
+}
+
 function requestLikelyNeedsArtifacts(prompt: string): boolean {
   const text = prompt.toLowerCase();
   const implementationSignals =
@@ -439,10 +453,11 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   async function createTicketFromPrompt(prompt: string): Promise<AgentTicket> {
+    const agents = tree.getAll();
     const ticket = await opsStore.createTicket({
       title: deriveTitleFromPrompt(prompt),
       prompt,
-      routeResults: routeTask(prompt),
+      routeResults: routeTaskAgainstAvailableAgents(prompt, agents),
       workspaceLabel: getWorkspaceLabel(),
     });
     refreshAll();
@@ -480,7 +495,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await opsStore.createTicket({
         title: spec.title,
         prompt: spec.prompt,
-        routeResults: routeTask(spec.prompt),
+        routeResults: routeTaskAgainstAvailableAgents(spec.prompt, tree.getAll()),
         workspaceLabel: getWorkspaceLabel(),
       });
       existing.add(normalizedTitle);
@@ -854,6 +869,29 @@ export function activate(context: vscode.ExtensionContext): void {
     if (plan.kind === "parse-error") {
       vscode.window.showWarningMessage(
         "Manager LM returned a non-JSON response; next step not planned. You can re-run the step or override manually."
+      );
+      return;
+    }
+
+    if (plan.kind === "invalid-plan") {
+      const fallbackAgent = resolveAgentNameForTask(
+        "reviewer",
+        refreshed.prompt,
+        availableAgents
+      );
+      await opsStore.appendDynamicStep(ticket.id, {
+        agentName: fallbackAgent,
+        title: "Re-scope Next Step",
+        prompt:
+          `@${fallbackAgent}\n` +
+          `The manager rejected the prior next-step assignment because it was not grounded in the ticket request or prior outputs. ` +
+          `Use ONLY the original request and quoted prior outputs already in this handoff to determine the single most relevant next step. ` +
+          `If the ticket is actually complete, provide concrete verification or artifact evidence instead of a generic status update.\n\n` +
+          `Paste your full response back into the Agent Manager queue when finished.`,
+      });
+      refreshAll();
+      vscode.window.showWarningMessage(
+        "Manager rejected an off-task next-step assignment and queued a Re-scope Next Step review."
       );
       return;
     }
@@ -1469,8 +1507,8 @@ export function activate(context: vscode.ExtensionContext): void {
       });
       if (!input) return;
 
-      const results = routeTask(input);
       const agents = tree.getAll();
+      const results = routeTaskAgainstAvailableAgents(input, agents);
       const items = results.map((r) => {
         const meta = agents.find((a) => a.name === r.agentName);
         return {
@@ -1532,7 +1570,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const ticket = await opsStore.createTicket({
           title: deriveTitleFromPrompt(request.prompt),
           prompt: request.prompt,
-          routeResults: routeTask(request.prompt),
+          routeResults: routeTaskAgainstAvailableAgents(request.prompt, agents),
           workspaceLabel: getWorkspaceLabel(),
         });
         refreshAll();
@@ -1576,8 +1614,10 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
-      const results = routeTask(request.prompt);
-      let chosenName = results[0]?.agentName ?? "brainstorming";
+      const results = routeTaskAgainstAvailableAgents(request.prompt, agents);
+      let chosenName =
+        results[0]?.agentName ??
+        resolveAgentNameForTask("subagent-driven-development", request.prompt, agents);
 
       if ((results[0]?.score ?? 0) < 5 && agents.length > 0) {
         const agentList = agents

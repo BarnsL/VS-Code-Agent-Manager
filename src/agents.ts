@@ -24,6 +24,11 @@ export interface RouteResult {
   reason: string;
 }
 
+export interface AgentRoutingTarget {
+  name: string;
+  description?: string;
+}
+
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
 export const USER_PROMPTS_DIR = path.join(
@@ -144,6 +149,8 @@ interface SignalRule {
 const SIGNAL_RULES: SignalRule[] = [
   { pattern: /vscode|visual.?studio.?code|mcp|register.*(tool|server|integration)|integration/i, agent: "subagent-driven-development", score: 8, reason: "platform integration signal" },
   { pattern: /error|exception|stack.?trace|failing|failed|broken|bug|crash|not.?work/i, agent: "systematic-debugging", score: 10, reason: "debug signal" },
+  { pattern: /automation|workflow|orchestration|agent manager|improve|improvement|optimi[sz]e/i, agent: "subagent-driven-development", score: 7, reason: "automation / implementation improvement" },
+  { pattern: /\btest(ing)?\b|evaluate|exercise|smoke.?test|validation/i, agent: "verification-before-completion", score: 6, reason: "testing / evaluation signal" },
   { pattern: /review.?feedback|pr.?comment|lgtm|reviewer.?said|inline.?review/i, agent: "receiving-code-review", score: 10, reason: "review feedback" },
   { pattern: /all.?tests?.?pass|ready.?to.?(ship|merge|deploy)|done.?implement/i, agent: "finishing-a-development-branch", score: 9, reason: "branch completion" },
   { pattern: /verify|check.?before.?(commit|merge|push)|before.?i.?(commit|merge)/i, agent: "verification-before-completion", score: 9, reason: "verification request" },
@@ -158,7 +165,82 @@ const SIGNAL_RULES: SignalRule[] = [
   { pattern: /i.?want.?to.?build|add.?feature|implement|new.?functionality/i, agent: "brainstorming", score: 3, reason: "feature request" },
 ];
 
-export function routeTask(prompt: string): RouteResult[] {
+const ROUTING_FAMILY_HINTS: Record<string, string[]> = {
+  brainstorming: ["brainstorm", "explore", "ideas", "research", "discovery"],
+  "writing-plans": ["plan", "planning", "design", "spec", "architecture"],
+  "executing-plans": ["execute", "implement", "build", "develop", "code"],
+  "subagent-driven-development": ["implement", "build", "develop", "code", "feature", "automation", "workflow", "maintain"],
+  "systematic-debugging": ["debug", "diagnose", "bug", "error", "fix", "repair"],
+  "verification-before-completion": ["verify", "verification", "test", "validate", "qa", "smoke"],
+  "requesting-code-review": ["review", "reviewer", "critique"],
+  "receiving-code-review": ["review", "feedback", "comments"],
+  "finishing-a-development-branch": ["ship", "merge", "finish", "release"],
+  maintainer: ["maintain", "implement", "build", "fix", "code", "automation", "workflow"],
+  developer: ["develop", "implement", "build", "code", "feature", "automation"],
+  reviewer: ["review", "verify", "test", "qa", "critique"],
+  "documentation-writer": ["docs", "documentation", "write", "readme", "guide"],
+};
+
+function normalizeAgentSlug(value: string): string {
+  return value.trim().toLowerCase().replace(/^@/, "");
+}
+
+function extractPromptTokens(prompt: string): string[] {
+  const matches = prompt.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? [];
+  return Array.from(new Set(matches));
+}
+
+export function resolveAgentNameForTask(
+  desiredAgent: string,
+  taskPrompt: string,
+  availableAgents: AgentRoutingTarget[]
+): string {
+  if (availableAgents.length === 0) return normalizeAgentSlug(desiredAgent);
+
+  const desired = normalizeAgentSlug(desiredAgent);
+  const exact = availableAgents.find((agent) => normalizeAgentSlug(agent.name) === desired);
+  if (exact) return exact.name;
+
+  const hints = ROUTING_FAMILY_HINTS[desired] ?? [];
+  const promptTokens = extractPromptTokens(taskPrompt);
+  const ranked = availableAgents
+    .map((agent) => {
+      const haystack = `${normalizeAgentSlug(agent.name)} ${(agent.description ?? "").toLowerCase()}`;
+      let score = 0;
+      for (const hint of hints) {
+        if (haystack.includes(hint)) score += 12;
+      }
+      for (const token of promptTokens) {
+        if (token.length >= 5 && haystack.includes(token)) score += 2;
+      }
+      if (/maintain|implement|build|develop|code|automation/.test(haystack)) {
+        if (/build|implement|feature|improve|improvement|automation|workflow|fix|refactor/.test(taskPrompt.toLowerCase())) {
+          score += 5;
+        }
+      }
+      if (/review|verify|test|qa/.test(haystack) && /test|verify|validate|review|check/.test(taskPrompt.toLowerCase())) {
+        score += 5;
+      }
+      if (/docs|documentation|readme|guide/.test(haystack) && /doc|readme|guide|write/.test(taskPrompt.toLowerCase())) {
+        score += 5;
+      }
+      return { agent, score };
+    })
+    .sort((left, right) => right.score - left.score || left.agent.name.localeCompare(right.agent.name));
+
+  if ((ranked[0]?.score ?? 0) > 0) return ranked[0].agent.name;
+
+  for (const fallback of ["maintainer", "developer", "reviewer", "documentation-writer"]) {
+    const match = availableAgents.find((agent) => normalizeAgentSlug(agent.name) === fallback);
+    if (match) return match.name;
+  }
+  return availableAgents[0].name;
+}
+
+export function routeTask(
+  prompt: string,
+  availableAgents: AgentRoutingTarget[] = []
+): RouteResult[] {
   const scores = new Map<string, { score: number; reason: string }>();
 
   for (const rule of SIGNAL_RULES) {
@@ -171,10 +253,25 @@ export function routeTask(prompt: string): RouteResult[] {
   }
 
   if (scores.size === 0) {
-    scores.set("brainstorming", { score: 1, reason: "no signal — default" });
+    const fallback = availableAgents.length
+      ? resolveAgentNameForTask("subagent-driven-development", prompt, availableAgents)
+      : "brainstorming";
+    scores.set(fallback, { score: 1, reason: "no signal — default" });
   }
 
-  return Array.from(scores.entries())
+  const resolvedScores = new Map<string, { score: number; reason: string }>();
+  for (const [agentName, meta] of scores.entries()) {
+    const resolved = availableAgents.length
+      ? resolveAgentNameForTask(agentName, prompt, availableAgents)
+      : agentName;
+    const existing = resolvedScores.get(resolved);
+    const reason = resolved !== agentName ? `${meta.reason}; mapped from @${agentName}` : meta.reason;
+    if (!existing || meta.score > existing.score) {
+      resolvedScores.set(resolved, { score: meta.score, reason });
+    }
+  }
+
+  return Array.from(resolvedScores.entries())
     .sort((a, b) => b[1].score - a[1].score)
     .slice(0, 3)
     .map(([agentName, { score, reason }]) => ({
