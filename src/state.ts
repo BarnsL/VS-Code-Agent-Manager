@@ -81,11 +81,21 @@ export interface DashboardSnapshot {
     percentUsed: number;
   };
   activity: ActivityEvent[];
+  workflowAutomation: WorkflowAutomationState;
+}
+
+export interface WorkflowAutomationState {
+  autoProceedEnabled: boolean;
 }
 
 const TICKETS_KEY = "copilot-agents.tickets";
 const ACTIVITY_KEY = "copilot-agents.activity";
 const USAGE_KEY = "copilot-agents.usage";
+const WORKFLOW_AUTOMATION_KEY = "copilot-agents.workflowAutomation";
+
+const DEFAULT_WORKFLOW_AUTOMATION: WorkflowAutomationState = {
+  autoProceedEnabled: true,
+};
 
 const DEFAULT_USAGE: CopilotUsageState = {
   planId: "pro+",
@@ -243,6 +253,15 @@ function normalizeUsage(usage: Partial<CopilotUsageState> | undefined): CopilotU
   };
 }
 
+function normalizeWorkflowAutomation(
+  workflowAutomation: Partial<WorkflowAutomationState> | undefined
+): WorkflowAutomationState {
+  return {
+    ...DEFAULT_WORKFLOW_AUTOMATION,
+    ...workflowAutomation,
+  };
+}
+
 function buildWorkflow(prompt: string, routeResults: RouteResult[]): WorkflowStep[] {
   const recommendedAgents = dedupeAgents(routeResults.map((result) => result.agentName));
   const leadAgent = recommendedAgents[0] ?? "brainstorming";
@@ -297,6 +316,28 @@ export class AgentOpsStore {
 
   getUsage(): CopilotUsageState {
     return normalizeUsage(this.context.globalState.get<Partial<CopilotUsageState>>(USAGE_KEY));
+  }
+
+  getWorkflowAutomation(): WorkflowAutomationState {
+    return normalizeWorkflowAutomation(
+      this.context.workspaceState.get<Partial<WorkflowAutomationState>>(WORKFLOW_AUTOMATION_KEY)
+    );
+  }
+
+  async setWorkflowAutomation(
+    input: Partial<WorkflowAutomationState>
+  ): Promise<WorkflowAutomationState> {
+    const current = this.getWorkflowAutomation();
+    const next = normalizeWorkflowAutomation({
+      ...current,
+      ...input,
+    });
+    await this.context.workspaceState.update(WORKFLOW_AUTOMATION_KEY, next);
+    await this.recordEvent({
+      type: "workflow-automation-updated",
+      message: `Workflow auto proceed ${next.autoProceedEnabled ? "enabled" : "disabled"}`,
+    });
+    return next;
   }
 
   async createTicket(input: {
@@ -528,6 +569,7 @@ export class AgentOpsStore {
         percentUsed,
       },
       activity: this.getActivity(),
+      workflowAutomation: this.getWorkflowAutomation(),
     };
   }
 }

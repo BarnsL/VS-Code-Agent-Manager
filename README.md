@@ -47,6 +47,9 @@ Break complex tasks into ordered, agent-specific steps and track them from creat
 - One-click **Run Step** opens the correct agent in Copilot chat with a structured handoff prompt  
 - **Complete Step** captures a handoff summary that is passed to the next agent  
 - Ticket status flows through: `new → triaged → working → review → done`
+- **Step pipeline** rendered on every ticket card showing each step's status (queued / active / done / blocked) at a glance
+- **Auto-Drive** button on every open ticket cycles the ticket through every queued step, opening chat for each agent and writing automatic handoff summaries between them
+- New tickets **auto-launch their first step** when the *Auto-proceed workflow queue* toggle is on (top of the Workflow Queue panel)
 
 ### `@route` Chat Participant
 Type `@route <task>` in Copilot Chat to instantly get a ranked list of agents for your task with confidence scores and reasoning. Sub-commands:
@@ -120,6 +123,7 @@ Command palette → **Copilot Agents: New Agent** → choose a template (Debuggi
 | `Copilot Agents: Create Ticket Workflow` | Create a multi-step agent ticket |
 | `Copilot Agents: Run Next Ticket Step` | Launch the next queued step in chat |
 | `Copilot Agents: Complete Active Ticket Step` | Mark the current step done with a summary |
+| `Copilot Agents: Auto-Drive Ticket` | Cycle a ticket through every queued step end-to-end with automatic handoff summaries |
 | `Copilot Agents: Seed Required Feature Tickets` | Create roadmap tickets for auto-assignment, chat orchestration, and completion-driven lifecycle |
 | `Copilot Agents: Configure Copilot Usage Tracking` | Set plan and seed baseline usage |
 | `Copilot Agents: Sync Usage From Copilot Panel` | Seed usage from Copilot Quick Settings percent-used value |

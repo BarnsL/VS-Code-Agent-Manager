@@ -6,6 +6,10 @@ exports.humanizeAgentName = humanizeAgentName;
 const TICKETS_KEY = "copilot-agents.tickets";
 const ACTIVITY_KEY = "copilot-agents.activity";
 const USAGE_KEY = "copilot-agents.usage";
+const WORKFLOW_AUTOMATION_KEY = "copilot-agents.workflowAutomation";
+const DEFAULT_WORKFLOW_AUTOMATION = {
+    autoProceedEnabled: true,
+};
 const DEFAULT_USAGE = {
     planId: "pro+",
     planLabel: "Copilot Pro+",
@@ -150,6 +154,12 @@ function normalizeUsage(usage) {
         ...usage,
     };
 }
+function normalizeWorkflowAutomation(workflowAutomation) {
+    return {
+        ...DEFAULT_WORKFLOW_AUTOMATION,
+        ...workflowAutomation,
+    };
+}
 function buildWorkflow(prompt, routeResults) {
     const recommendedAgents = dedupeAgents(routeResults.map((result) => result.agentName));
     const leadAgent = recommendedAgents[0] ?? "brainstorming";
@@ -198,6 +208,22 @@ class AgentOpsStore {
     }
     getUsage() {
         return normalizeUsage(this.context.globalState.get(USAGE_KEY));
+    }
+    getWorkflowAutomation() {
+        return normalizeWorkflowAutomation(this.context.workspaceState.get(WORKFLOW_AUTOMATION_KEY));
+    }
+    async setWorkflowAutomation(input) {
+        const current = this.getWorkflowAutomation();
+        const next = normalizeWorkflowAutomation({
+            ...current,
+            ...input,
+        });
+        await this.context.workspaceState.update(WORKFLOW_AUTOMATION_KEY, next);
+        await this.recordEvent({
+            type: "workflow-automation-updated",
+            message: `Workflow auto proceed ${next.autoProceedEnabled ? "enabled" : "disabled"}`,
+        });
+        return next;
     }
     async createTicket(input) {
         const now = new Date().toISOString();
@@ -392,6 +418,7 @@ class AgentOpsStore {
                 percentUsed,
             },
             activity: this.getActivity(),
+            workflowAutomation: this.getWorkflowAutomation(),
         };
     }
 }

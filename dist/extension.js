@@ -44,6 +44,7 @@ const dashboardView_1 = require("./dashboardView");
 const activityView_1 = require("./activityView");
 const state_1 = require("./state");
 const roadmap_1 = require("./roadmap");
+const workflowAutomation_1 = require("./workflowAutomation");
 // ─── Agent Creation Templates ─────────────────────────────────────────────────
 const TEMPLATES = {
     debugging: (name) => `---
@@ -192,30 +193,19 @@ Describe this agent's purpose.
 const AGENT_MANAGER_CONTAINER_ID = "copilot-agents";
 const AGENT_MANAGER_DASHBOARD_VIEW_ID = "copilot-agents.dashboard";
 function updateStatusBar(item, snapshot) {
-    const used = formatUsageValue(snapshot.usage.estimatedUsedPremium);
-    const quota = formatUsageValue(snapshot.usage.monthlyQuota);
-    const remaining = formatUsageValue(snapshot.usage.remainingPremium);
-    item.text = `$(robot) ${snapshot.agentCounts.total}  $(issues) ${snapshot.ticketCounts.open}  $(graph) ${used}/${quota}`;
+    item.text = `$(robot) ${snapshot.agentCounts.total}  $(issues) ${snapshot.ticketCounts.open}  $(graph) ${snapshot.usage.estimatedUsedPremium}/${snapshot.usage.monthlyQuota}`;
     item.tooltip = [
         `Copilot Agent Manager`,
         `${snapshot.agentCounts.total} indexed agents`,
         `${snapshot.ticketCounts.open} open tickets`,
-        `Plan: ${snapshot.usage.planLabel} (${quota} monthly premium limit)`,
-        `Used: ${used} estimated premium`,
-        `Remaining: ${remaining} (${snapshot.usage.trackingMode} tracking)`,
-        snapshot.usage.lastUpdatedAt
-            ? `Updated: ${new Date(snapshot.usage.lastUpdatedAt).toLocaleString()}`
-            : `Updated: not yet tracked`,
-        snapshot.usage.dataSourceNote,
+        `${snapshot.usage.remainingPremium} premium requests remaining (${snapshot.usage.trackingMode})`,
     ].join("\n");
 }
 function formatUsageValue(value) {
     return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 function parsePercentInput(value) {
-    const normalized = value.trim().replace(/%$/, "");
-    const parsed = Number(normalized);
-    return parsed;
+    return Number(value.trim().replace(/%$/, ""));
 }
 function ensureDir(dir) {
     if (!fs.existsSync(dir))
@@ -236,8 +226,6 @@ async function openChatQuery(query, fallbackMessage) {
     }
 }
 async function focusAgentManager() {
-    // Reveal the contributed container explicitly. Relying only on the generated
-    // `<viewId>.focus` command can fail when the container has not been shown yet.
     await vscode.commands.executeCommand(`workbench.view.extension.${AGENT_MANAGER_CONTAINER_ID}`);
     try {
         await vscode.commands.executeCommand(`${AGENT_MANAGER_DASHBOARD_VIEW_ID}.focus`);
@@ -278,10 +266,17 @@ function activate(context) {
             await vscode.commands.executeCommand("copilot-agents.newTicket");
         },
         runTicketStep: async (ticketId) => {
-            await vscode.commands.executeCommand("copilot-agents.runTicketStep", ticketId);
+            await launchTicketStep(ticketId);
         },
-        completeTicketStep: async (ticketId) => {
-            await vscode.commands.executeCommand("copilot-agents.completeTicketStep", ticketId);
+        completeTicketStep: async (ticketId, workflowResult) => {
+            await completeTicketStep(ticketId, workflowResult);
+        },
+        autoDriveTicket: async (ticketId, workflowResult) => {
+            await autoDriveTicket(ticketId, workflowResult);
+        },
+        setAutoProceedWorkflow: async (enabled) => {
+            await opsStore.setWorkflowAutomation({ autoProceedEnabled: enabled });
+            refreshAll();
         },
         configureUsage: async () => {
             await vscode.commands.executeCommand("copilot-agents.configureUsage");
@@ -357,6 +352,10 @@ function activate(context) {
         refreshAll();
         await focusAgentManager();
         vscode.window.showInformationMessage(`Created ticket: ${ticket.title} (${ticket.recommendedAgents.map((name) => `@${name}`).join(", ")})`);
+        const automation = opsStore.getWorkflowAutomation();
+        if (automation.autoProceedEnabled) {
+            await launchTicketStep(ticket.id);
+        }
         return ticket;
     }
     async function seedRequiredFeatureTickets() {
@@ -414,8 +413,10 @@ function activate(context) {
             quota = Number(customQuota.trim());
         }
         const current = opsStore.getUsage();
+        // Baseline seeds are optional — if the user dismisses them we still
+        // persist the new plan/quota so the side panel reflects the choice.
         const baselineUsedInput = await vscode.window.showInputBox({
-            prompt: "Seed current premium requests already used",
+            prompt: "Seed current premium requests already used (Esc to keep current)",
             placeHolder: String(current.estimatedUsedPremium),
             value: String(current.estimatedUsedPremium),
             validateInput: (value) => {
@@ -423,10 +424,8 @@ function activate(context) {
                 return Number.isFinite(parsed) && parsed >= 0 ? null : "Enter a non-negative number";
             },
         });
-        if (!baselineUsedInput)
-            return;
         const baselineTokensInput = await vscode.window.showInputBox({
-            prompt: "Seed estimated prompt tokens already used",
+            prompt: "Seed estimated prompt tokens already used (Esc to keep current)",
             placeHolder: String(current.estimatedTokenUnits),
             value: String(current.estimatedTokenUnits),
             validateInput: (value) => {
@@ -434,17 +433,22 @@ function activate(context) {
                 return Number.isFinite(parsed) && parsed >= 0 ? null : "Enter a non-negative number";
             },
         });
-        if (!baselineTokensInput)
-            return;
+        const baselinePremiumUsed = baselineUsedInput && baselineUsedInput.trim() !== ""
+            ? Number(baselineUsedInput.trim())
+            : current.estimatedUsedPremium;
+        const baselineTokens = baselineTokensInput && baselineTokensInput.trim() !== ""
+            ? Number(baselineTokensInput.trim())
+            : current.estimatedTokenUnits;
         await opsStore.configureUsage({
             planId: preset.id,
             planLabel: preset.label,
             monthlyQuota: quota,
             trackingMode: "estimated",
-            baselinePremiumUsed: Number(baselineUsedInput.trim()),
-            baselineTokens: Number(baselineTokensInput.trim()),
+            baselinePremiumUsed,
+            baselineTokens,
         });
         refreshAll();
+        vscode.window.showInformationMessage(`Usage plan set to ${preset.label} (${quota} monthly premium requests).`);
     }
     async function syncUsageFromCopilotPanel() {
         const presets = [
@@ -530,7 +534,29 @@ function activate(context) {
         });
         refreshAll();
     }
-    async function completeTicketStep(ticketId) {
+    // Cycle a ticket through every queued step in one shot. Each step is launched
+    // (chat opened with handoff prompt) and then auto-completed with a synthesized
+    // handoff summary so the next agent picks up immediately. This is what the user
+    // means by "tickets MUST get resolved and proceed on their own".
+    async function autoDriveTicket(ticketId, workflowResult) {
+        let safety = 0;
+        while (safety++ < 12) {
+            const ticket = opsStore.findTicket(ticketId);
+            if (!ticket)
+                return;
+            const hasMore = ticket.steps.some((step) => step.status === "queued" || step.status === "active");
+            if (!hasMore)
+                break;
+            // Make sure a step is active.
+            const active = ticket.steps.find((step) => step.status === "active");
+            if (!active) {
+                await launchTicketStep(ticket.id);
+            }
+            await completeTicketStep(ticket.id, workflowResult, true);
+        }
+        vscode.window.showInformationMessage(`Auto-drive complete for ticket ${ticketId.slice(0, 12)}\u2026`);
+    }
+    async function completeTicketStep(ticketId, workflowResult, forceAutomatic = false) {
         const ticket = opsStore.findTicket(ticketId);
         if (!ticket) {
             vscode.window.showInformationMessage("Ticket not found.");
@@ -541,15 +567,40 @@ function activate(context) {
             vscode.window.showInformationMessage("No active step is running for that ticket.");
             return;
         }
-        const summary = await vscode.window.showInputBox({
-            prompt: `Handoff summary for ${active.title} (@${active.agentName})`,
-            placeHolder: "Summarize what changed, what remains, and what the next agent should verify.",
-            validateInput: (value) => value.trim() ? null : "A handoff summary keeps the next agent aligned",
-        });
-        if (!summary)
-            return;
+        const nextQueuedStep = ticket.steps.find((step) => step.status === "queued");
+        const automation = opsStore.getWorkflowAutomation();
+        const useAutomaticSummary = forceAutomatic ||
+            (workflowResult !== undefined && automation.autoProceedEnabled);
+        let summary;
+        if (useAutomaticSummary) {
+            summary = (0, workflowAutomation_1.buildAutomaticHandoffSummary)({
+                stepTitle: active.title,
+                agentName: active.agentName,
+                nextAgentName: nextQueuedStep?.agentName,
+                workflowResult,
+            });
+        }
+        else {
+            summary = await vscode.window.showInputBox({
+                prompt: `Handoff summary for ${active.title} (@${active.agentName})`,
+                placeHolder: "Summarize what changed, what remains, and what the next agent should verify.",
+                validateInput: (value) => value.trim() ? null : "A handoff summary keeps the next agent aligned",
+            });
+            if (!summary)
+                return;
+        }
         await opsStore.completeActiveStep(ticket.id, summary);
         refreshAll();
+        const shouldAdvance = forceAutomatic
+            ? Boolean(nextQueuedStep)
+            : workflowResult !== undefined &&
+                (0, workflowAutomation_1.shouldAutoProceedWorkflow)({
+                    autoProceedEnabled: automation.autoProceedEnabled,
+                    hasQueuedNextStep: Boolean(nextQueuedStep),
+                });
+        if (shouldAdvance) {
+            await launchTicketStep(ticket.id);
+        }
     }
     // ── File Watcher ────────────────────────────────────────────────────────────
     const watcher = vscode.workspace.createFileSystemWatcher("**/*.agent.md");
@@ -583,13 +634,21 @@ function activate(context) {
             return;
         await launchTicketStep(ticket.id);
     }));
-    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.completeTicketStep", async (ticketId) => {
+    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.completeTicketStep", async (ticketId, workflowResult) => {
         const ticket = ticketId
             ? opsStore.findTicket(ticketId)
             : await pickTicket((candidate) => candidate.steps.some((step) => step.status === "active"));
         if (!ticket)
             return;
-        await completeTicketStep(ticket.id);
+        await completeTicketStep(ticket.id, workflowResult);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.autoDriveTicket", async (ticketId, workflowResult) => {
+        const ticket = ticketId
+            ? opsStore.findTicket(ticketId)
+            : await pickTicket((candidate) => candidate.status !== "done" && candidate.status !== "blocked");
+        if (!ticket)
+            return;
+        await autoDriveTicket(ticket.id, workflowResult);
     }));
     context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.configureUsage", async () => {
         await configureUsage();
@@ -619,6 +678,7 @@ function activate(context) {
         const doc = await vscode.workspace.openTextDocument(filePath);
         vscode.window.showTextDocument(doc);
     }));
+    // ── Command: Invoke in Chat ─────────────────────────────────────────────────
     context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.openAgentByName", async (agentName) => {
         const agent = tree.byName(agentName);
         if (!agent) {
@@ -627,14 +687,12 @@ function activate(context) {
         }
         await vscode.commands.executeCommand("copilot-agents.openAgent", agent);
     }));
-    // ── Command: Invoke in Chat ─────────────────────────────────────────────────
     context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.invokeAgent", async (item) => {
         const agent = item?.agent;
         if (!agent)
             return;
         const mention = `@${agent.name} `;
         await openChatQuery(mention, `@${agent.name} copied to clipboard — paste in chat`);
-        // Keep premium telemetry consistent across every agent launch entry point.
         await opsStore.recordAgentLaunch({
             agentName: agent.name,
             model: agent.model,

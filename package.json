@@ -125,6 +125,12 @@
         "category": "Copilot Agents"
       },
       {
+        "command": "copilot-agents.autoDriveTicket",
+        "title": "Auto-Drive Ticket",
+        "icon": "$(rocket)",
+        "category": "Copilot Agents"
+      },
+      {
         "command": "copilot-agents.seedRequiredFeatureTickets",
         "title": "Seed Required Feature Tickets",
         "icon": "$(checklist)",

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { DashboardSnapshot, TicketStatus, humanizeAgentName } from "./state";
+import { getQueueActionLabel } from "./workflowAutomation";
 
 const STATUS_COLUMNS: Array<{ status: TicketStatus; label: string }> = [
   { status: "new", label: "New" },
@@ -13,8 +14,10 @@ const STATUS_COLUMNS: Array<{ status: TicketStatus; label: string }> = [
 export interface DashboardActions {
   getSnapshot(): DashboardSnapshot;
   createTicket(): Thenable<void>;
-  runTicketStep(ticketId: string): Thenable<void>;
-  completeTicketStep(ticketId: string): Thenable<void>;
+  runTicketStep(ticketId: string, workflowResult?: string): Thenable<void>;
+  completeTicketStep(ticketId: string, workflowResult?: string): Thenable<void>;
+  autoDriveTicket(ticketId: string, workflowResult?: string): Thenable<void>;
+  setAutoProceedWorkflow(enabled: boolean): Thenable<void>;
   configureUsage(): Thenable<void>;
   openAgent(agentName: string): Thenable<void>;
   copyMention(agentName: string): Thenable<void>;
@@ -43,6 +46,8 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
         type?: string;
         ticketId?: string;
         agentName?: string;
+        workflowResult?: string;
+        enabled?: boolean;
       };
 
       switch (payload.type) {
@@ -50,10 +55,24 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
           await this.actions.createTicket();
           return;
         case "runTicketStep":
-          if (payload.ticketId) await this.actions.runTicketStep(payload.ticketId);
+          if (payload.ticketId) {
+            await this.actions.runTicketStep(payload.ticketId, payload.workflowResult);
+          }
           return;
         case "completeTicketStep":
-          if (payload.ticketId) await this.actions.completeTicketStep(payload.ticketId);
+          if (payload.ticketId) {
+            await this.actions.completeTicketStep(payload.ticketId, payload.workflowResult);
+          }
+          return;
+        case "autoDriveTicket":
+          if (payload.ticketId) {
+            await this.actions.autoDriveTicket(payload.ticketId, payload.workflowResult);
+          }
+          return;
+        case "setAutoProceedWorkflow":
+          if (typeof payload.enabled === "boolean") {
+            await this.actions.setAutoProceedWorkflow(payload.enabled);
+          }
           return;
         case "configureUsage":
           await this.actions.configureUsage();
@@ -89,7 +108,10 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
     const queueMarkup = snapshot.queue.length
       ? snapshot.queue
           .map((item) => {
-            const buttonLabel = item.status === "active" ? "Complete Step" : "Run Step";
+            const buttonLabel = getQueueActionLabel({
+              status: item.status,
+              autoProceedEnabled: snapshot.workflowAutomation.autoProceedEnabled,
+            });
             const commandType = item.status === "active" ? "completeTicketStep" : "runTicketStep";
             return `
               <article class="queue-item">
@@ -144,6 +166,18 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                           <span class="ticket-badge status-${status}">${label}</span>
                         </div>
                         <div class="ticket-prompt">${escapeHtml(ticket.prompt)}</div>
+                        <ol class="step-pipeline">
+                          ${ticket.steps
+                            .map(
+                              (step, index) => `
+                                <li class="step-node step-${step.status}" title="${escapeHtml(step.title)} \u2022 @${escapeHtml(step.agentName)} \u2022 ${step.status}">
+                                  <span class="step-index">${index + 1}</span>
+                                  <span class="step-label">${escapeHtml(step.title)}</span>
+                                </li>
+                              `
+                            )
+                            .join("")}
+                        </ol>
                         <div class="ticket-meta">
                           <span>${completed}/${ticket.steps.length} steps complete</span>
                           <span>${escapeHtml(nextAgent)}</span>
@@ -168,6 +202,9 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                             : primaryAgent
                               ? `<button class="ghost" data-command="copyMention" data-agent-name="${escapeHtml(primaryAgent)}">Copy Lead</button>`
                               : ""}
+                          ${status !== "done" && status !== "blocked"
+                            ? `<button class="ghost" data-command="autoDriveTicket" data-ticket-id="${escapeHtml(ticket.id)}">Auto-Drive</button>`
+                            : ""}
                         </div>
                       </article>
                     `;
@@ -396,6 +433,30 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       align-items: center;
     }
 
+    .queue-toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    .workflow-result {
+      width: 100%;
+      min-height: 72px;
+      border-radius: 10px;
+      border: 1px solid var(--stroke);
+      background: color-mix(in srgb, var(--surface-strong) 96%, transparent);
+      color: var(--vscode-foreground);
+      resize: vertical;
+      padding: 10px;
+      margin-bottom: 12px;
+      font-family: var(--vscode-font-family);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
     .queue-ticket,
     .ticket-title {
       font-weight: 700;
@@ -411,6 +472,48 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       color: var(--muted);
       font-size: 12px;
       line-height: 1.5;
+    }
+
+    .step-pipeline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      list-style: none;
+      margin: 6px 0 4px;
+      padding: 0;
+    }
+
+    .step-node {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      border: 1px solid var(--stroke);
+      background: var(--surface);
+      color: var(--muted);
+    }
+
+    .step-node .step-index {
+      font-weight: 700;
+      opacity: 0.65;
+    }
+
+    .step-node.step-active {
+      border-color: color-mix(in srgb, #1f8fff 70%, var(--stroke));
+      color: var(--text);
+      background: color-mix(in srgb, #1f8fff 18%, var(--surface));
+    }
+
+    .step-node.step-done {
+      border-color: color-mix(in srgb, #3fb950 60%, var(--stroke));
+      color: color-mix(in srgb, #3fb950 80%, var(--text));
+    }
+
+    .step-node.step-blocked {
+      border-color: color-mix(in srgb, #f85149 60%, var(--stroke));
+      color: color-mix(in srgb, #f85149 80%, var(--text));
     }
 
     .ticket-board {
@@ -586,6 +689,11 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       <article class="panel">
         <h2>Workflow Queue</h2>
         <p class="subtitle">Start the next queued agent or complete the active handoff to move work across agents.</p>
+        <label class="queue-toggle">
+          <input type="checkbox" id="auto-proceed-toggle" ${snapshot.workflowAutomation.autoProceedEnabled ? "checked" : ""} />
+          Auto-proceed workflow queue (complete active step and run next step automatically)
+        </label>
+        <textarea id="workflow-result" class="workflow-result" placeholder="Optional workflow result text used in automatic handoff summaries."></textarea>
         <div class="queue-list">${queueMarkup}</div>
       </article>
     </section>
@@ -607,6 +715,18 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const resultBox = document.getElementById("workflow-result");
+    const autoProceedToggle = document.getElementById("auto-proceed-toggle");
+
+    if (autoProceedToggle instanceof HTMLInputElement) {
+      autoProceedToggle.addEventListener("change", () => {
+        vscode.postMessage({
+          type: "setAutoProceedWorkflow",
+          enabled: autoProceedToggle.checked,
+        });
+      });
+    }
+
     document.addEventListener("click", (event) => {
       const target = event.target;
       if (!(target instanceof Element)) {
@@ -622,6 +742,7 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
         type: button.dataset.command,
         ticketId: button.dataset.ticketId,
         agentName: button.dataset.agentName,
+        workflowResult: resultBox instanceof HTMLTextAreaElement ? resultBox.value : undefined,
       });
     });
   </script>
