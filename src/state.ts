@@ -1,8 +1,19 @@
 import * as vscode from "vscode";
 import { AgentInfo, RouteResult } from "./agents";
 
+// ─── Status taxonomies ────────────────────────────────────────────────────────
+// Ticket lifecycle visible on the kanban board.
 export type TicketStatus = "new" | "triaged" | "working" | "review" | "blocked" | "done";
-export type WorkflowStepStatus = "queued" | "active" | "done" | "blocked";
+// Step lifecycle. "awaiting-output" is the new gate that forces the manager to
+// receive a step's actual chat result before it composes the next step prompt.
+// This replaces the prior blind auto-drive loop that fired steps one after
+// another without ever inspecting the chat output.
+export type WorkflowStepStatus =
+  | "queued"
+  | "active"
+  | "awaiting-output"
+  | "done"
+  | "blocked";
 export type UsageTrackingMode = "estimated" | "manual";
 
 export interface WorkflowStep {
@@ -11,9 +22,39 @@ export interface WorkflowStep {
   agentName: string;
   status: WorkflowStepStatus;
   prompt: string;
+  /** Free-form handoff text shown to the next agent. */
   summary?: string;
+  /**
+   * Raw output captured from the chat after the step finished. The manager
+   * forwards this verbatim to the next agent so context is never lost.
+   */
+  output?: string;
+  /**
+   * Manager-generated structured analysis derived from `output`. Used to seed
+   * the next step prompt with explicit "what was produced / what to do next".
+   */
+  analysis?: string;
+  /** Optional parallel-lane id for fan-out across multiple chats. */
+  laneId?: string;
   startedAt?: string;
   completedAt?: string;
+}
+
+/**
+ * Represents an optional parallel execution lane within a ticket. Each lane
+ * may target a different agent and run concurrently in its own chat tab so
+ * independent work (e.g. tests + docs + impl) can proceed in parallel without
+ * blocking the primary timeline.
+ */
+export interface TicketLane {
+  id: string;
+  label: string;
+  agentName: string;
+  status: WorkflowStepStatus;
+  prompt?: string;
+  output?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentTicket {
@@ -28,6 +69,15 @@ export interface AgentTicket {
   createdAt: string;
   updatedAt: string;
   steps: WorkflowStep[];
+  /** Optional parallel side-chats spawned from this ticket. */
+  lanes?: TicketLane[];
+  /**
+   * When true, the manager auto-launches the next sequential step as soon as
+   * the prior step's output has been submitted and analyzed. When false the
+   * user must click "Run Next Step" each time. Falls back to the global
+   * automation toggle when undefined.
+   */
+  continuousMode?: boolean;
 }
 
 export interface ActivityEvent {
@@ -209,9 +259,13 @@ function deriveTicketStatus(steps: WorkflowStep[]): TicketStatus {
   if (steps.some((step) => step.status === "blocked")) return "blocked";
   if (steps.length > 0 && steps.every((step) => step.status === "done")) return "done";
 
-  const active = steps.find((step) => step.status === "active");
-  if (active) {
-    return /review/.test(active.agentName) || /review/i.test(active.title)
+  // "awaiting-output" counts as still working — the manager is holding for
+  // the prior step's chat output before composing the next prompt.
+  const inFlight = steps.find(
+    (step) => step.status === "active" || step.status === "awaiting-output"
+  );
+  if (inFlight) {
+    return /review/.test(inFlight.agentName) || /review/i.test(inFlight.title)
       ? "review"
       : "working";
   }
@@ -223,12 +277,16 @@ function deriveTicketStatus(steps: WorkflowStep[]): TicketStatus {
 }
 
 function deriveCurrentAgentName(steps: WorkflowStep[]): string | undefined {
-  return steps.find((step) => step.status === "active")?.agentName;
+  return steps.find(
+    (step) => step.status === "active" || step.status === "awaiting-output"
+  )?.agentName;
 }
 
 function deriveNextAgentName(steps: WorkflowStep[]): string | undefined {
   return (
-    steps.find((step) => step.status === "active")?.agentName ||
+    steps.find(
+      (step) => step.status === "active" || step.status === "awaiting-output"
+    )?.agentName ||
     steps.find((step) => step.status === "queued")?.agentName
   );
 }
@@ -405,13 +463,22 @@ export class AgentOpsStore {
     };
   }
 
-  async completeActiveStep(ticketId: string, summary: string): Promise<AgentTicket | undefined> {
+  async completeActiveStep(
+    ticketId: string,
+    summary: string,
+    options: { output?: string; analysis?: string } = {}
+  ): Promise<AgentTicket | undefined> {
     const tickets = this.getTickets();
     const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
     if (ticketIndex < 0) return undefined;
 
     const ticket = { ...tickets[ticketIndex], steps: tickets[ticketIndex].steps.map((step) => ({ ...step })) };
-    const stepIndex = ticket.steps.findIndex((step) => step.status === "active");
+    // Accept active OR awaiting-output as the step we are completing — the
+    // awaiting-output state is transient and only used by the UI to show that
+    // the manager is holding for chat output before advancing.
+    const stepIndex = ticket.steps.findIndex(
+      (step) => step.status === "active" || step.status === "awaiting-output"
+    );
     if (stepIndex < 0) return undefined;
 
     const now = new Date().toISOString();
@@ -420,6 +487,8 @@ export class AgentOpsStore {
       status: "done",
       completedAt: now,
       summary: summary.trim(),
+      output: options.output?.trim() || ticket.steps[stepIndex].output,
+      analysis: options.analysis?.trim() || ticket.steps[stepIndex].analysis,
     };
     ticket.updatedAt = now;
 
@@ -433,6 +502,147 @@ export class AgentOpsStore {
       agentName: normalized.steps[stepIndex].agentName,
     });
     return normalized;
+  }
+
+  /**
+   * Park the active step in `awaiting-output` and persist the captured chat
+   * output + manager analysis. Used by the new structured advance flow so the
+   * next agent always receives the literal text the prior agent produced.
+   */
+  async markStepAwaitingOutput(
+    ticketId: string,
+    payload: { output: string; analysis?: string }
+  ): Promise<AgentTicket | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const ticket = { ...tickets[ticketIndex], steps: tickets[ticketIndex].steps.map((step) => ({ ...step })) };
+    const stepIndex = ticket.steps.findIndex(
+      (step) => step.status === "active" || step.status === "awaiting-output"
+    );
+    if (stepIndex < 0) return undefined;
+
+    const now = new Date().toISOString();
+    ticket.steps[stepIndex] = {
+      ...ticket.steps[stepIndex],
+      status: "awaiting-output",
+      output: payload.output.trim(),
+      analysis: payload.analysis?.trim() || ticket.steps[stepIndex].analysis,
+    };
+    ticket.updatedAt = now;
+
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-step-output-captured",
+      message: `${normalized.title} captured output for ${normalized.steps[stepIndex].title}`,
+      ticketId: normalized.id,
+      agentName: normalized.steps[stepIndex].agentName,
+    });
+    return normalized;
+  }
+
+  /**
+   * Replace the agent assigned to a still-queued step. Lets users hand-pick a
+   * different agent before the manager launches it.
+   */
+  async reassignStepAgent(
+    ticketId: string,
+    stepId: string,
+    nextAgentName: string
+  ): Promise<AgentTicket | undefined> {
+    const trimmed = nextAgentName.trim();
+    if (!trimmed) return undefined;
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const ticket = { ...tickets[ticketIndex], steps: tickets[ticketIndex].steps.map((step) => ({ ...step })) };
+    const stepIndex = ticket.steps.findIndex((step) => step.id === stepId);
+    if (stepIndex < 0) return undefined;
+    if (ticket.steps[stepIndex].status !== "queued") return undefined;
+
+    const previousAgent = ticket.steps[stepIndex].agentName;
+    ticket.steps[stepIndex] = {
+      ...ticket.steps[stepIndex],
+      agentName: trimmed,
+    };
+    ticket.updatedAt = new Date().toISOString();
+
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-step-reassigned",
+      message: `${normalized.title} reassigned ${normalized.steps[stepIndex].title}: @${previousAgent} -> @${trimmed}`,
+      ticketId: normalized.id,
+      agentName: trimmed,
+    });
+    return normalized;
+  }
+
+  /** Toggle a ticket's per-ticket continuous-mode override. */
+  async setTicketContinuousMode(
+    ticketId: string,
+    enabled: boolean
+  ): Promise<AgentTicket | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const ticket = { ...tickets[ticketIndex], continuousMode: enabled };
+    ticket.updatedAt = new Date().toISOString();
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-continuous-mode-toggled",
+      message: `${normalized.title} continuous mode ${enabled ? "on" : "off"}`,
+      ticketId: normalized.id,
+    });
+    return normalized;
+  }
+
+  /**
+   * Spawn a parallel side-chat lane on a ticket so a second agent can work in
+   * its own chat tab without blocking the main sequential timeline.
+   */
+  async spawnParallelLane(
+    ticketId: string,
+    input: { agentName: string; label?: string; prompt?: string }
+  ): Promise<{ ticket: AgentTicket; lane: TicketLane } | undefined> {
+    const tickets = this.getTickets();
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId);
+    if (ticketIndex < 0) return undefined;
+
+    const now = new Date().toISOString();
+    const lane: TicketLane = {
+      id: makeId("lane"),
+      label: input.label?.trim() || `Parallel @${input.agentName}`,
+      agentName: input.agentName,
+      status: "active",
+      prompt: input.prompt,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const ticket: AgentTicket = {
+      ...tickets[ticketIndex],
+      lanes: [...(tickets[ticketIndex].lanes ?? []), lane],
+      updatedAt: now,
+    };
+    const normalized = normalizeTicket(ticket);
+    tickets[ticketIndex] = normalized;
+    await this.context.workspaceState.update(TICKETS_KEY, tickets);
+    await this.recordEvent({
+      type: "ticket-parallel-lane-spawned",
+      message: `${normalized.title} spawned parallel lane @${input.agentName}`,
+      ticketId: normalized.id,
+      agentName: input.agentName,
+    });
+    return { ticket: normalized, lane };
   }
 
   async configureUsage(input: {
@@ -533,7 +743,10 @@ export class AgentOpsStore {
 
     const queue = tickets
       .map((ticket) => {
+        // Prefer awaiting-output / active so the queue surfaces the manager's
+        // current attention point before any still-queued step.
         const step =
+          ticket.steps.find((candidate) => candidate.status === "awaiting-output") ||
           ticket.steps.find((candidate) => candidate.status === "active") ||
           ticket.steps.find((candidate) => candidate.status === "queued");
         if (!step) return undefined;

@@ -1,6 +1,8 @@
 # VS Code Agent Manager
 
-A native VS Code extension that turns your Copilot agent files into a fully managed control center — with a live dashboard, premium usage tracking, multi-agent ticket workflows, and one-click `@route` orchestration.
+A native VS Code extension that turns your Copilot agent files into a fully managed, **manager-mediated** control center — with sequential output-gated handoffs, parallel side-chat lanes, on-the-fly agent reassignment, a live dashboard, premium usage tracking, multi-agent ticket workflows, and one-click `@route` orchestration.
+
+> **v1.1.0 — Manager-Mediated Workflow.** The extension no longer fires chat queries blindly. Each step runs, you paste the chat output back into the ticket card, the manager analyzes it, and only then composes the next agent’s prompt with the prior output quoted verbatim. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/AUTOMATION-MODEL.md`](docs/AUTOMATION-MODEL.md).
 
 ---
 
@@ -40,16 +42,21 @@ Because GitHub does not expose live per-user Copilot premium balances to extensi
 - Status tooltip now includes explicit **Plan limit**, **Used**, **Remaining**, **Last updated**, and tracking-source note for clearer quota interpretation
 - Usage is now recorded consistently from all launch entry points, including **Invoke in Chat** from Agent Index
 
-### Multi-Agent Ticket Workflows
-Break complex tasks into ordered, agent-specific steps and track them from creation through completion.
+### Multi-Agent Ticket Workflows (Manager-Mediated, v1.1.0)
+Break complex tasks into ordered, agent-specific steps and let the manager broker each handoff with the actual chat output in hand.
 
-- Create a ticket from any task description — the router automatically suggests the best agent sequence  
-- One-click **Run Step** opens the correct agent in Copilot chat with a structured handoff prompt  
-- **Complete Step** captures a handoff summary that is passed to the next agent  
+- Create a ticket from any task description — the router suggests the best agent sequence
+- One-click **Run Next Step** opens the correct agent in Copilot chat with a structured handoff prompt that quotes every prior step’s chat output verbatim
+- Each ticket card has a **per-step output textarea**. Paste the agent’s response, click **Submit Output + Analyze**, and the manager:
+  1. captures the raw output on the step
+  2. extracts a structured analysis (key points, open questions, headline)
+  3. composes the next prompt with both the raw output and the analysis embedded
+- **Continuous Mode** per ticket — when on, submitting output auto-launches the next agent. When off, the manager pauses for your review between agents.
+- **Spawn Parallel** opens a side-chat lane on a chosen agent that runs alongside the main timeline (great for multi-stream work across multiple chats)
+- **Reassign Agent** on the active step swaps the assignee without restarting the workflow
+- Step pipeline rendered on every ticket card showing each step’s status (queued / active / awaiting-output / done / blocked)
 - Ticket status flows through: `new → triaged → working → review → done`
-- **Step pipeline** rendered on every ticket card showing each step's status (queued / active / done / blocked) at a glance
-- **Auto-Drive** button on every open ticket cycles the ticket through every queued step, opening chat for each agent and writing automatic handoff summaries between them
-- New tickets **auto-launch their first step** when the *Auto-proceed workflow queue* toggle is on (top of the Workflow Queue panel)
+- The dashboard’s **Workflow Queue** surfaces each ticket’s current focus point so you can jump straight to the active textarea
 
 ### `@route` Chat Participant
 Type `@route <task>` in Copilot Chat to instantly get a ranked list of agents for your task with confidence scores and reasoning. Sub-commands:
@@ -92,14 +99,16 @@ Type `@route <task>` in Copilot Chat to instantly get a ranked list of agents fo
 - Use **Recent Agent Events** to open the relevant agent file quickly
 
 ### Creating a Ticket
-1. Command palette → **Copilot Agents: Create Ticket Workflow**  
-2. Describe your task — the router picks agent assignments automatically  
+1. Command palette → **Copilot Agents: Create Ticket Workflow**
+2. Describe your task — the router picks agent assignments automatically
 3. The dashboard opens with the new ticket in the board
 
-### Running a Ticket Step
-1. In the dashboard, click **Run Step** on any queued ticket  
-2. The correct agent prompt is opened in Copilot Chat with full context and prior handoffs  
-3. When the agent is done, click **Complete** in the dashboard and add a one-line handoff summary
+### Running a Ticket Step (Manager-Mediated)
+1. In the dashboard, click **Run Next Step** on any ticket
+2. The agent prompt opens in Copilot Chat with full context, prior chat output, and the manager’s prior analysis
+3. When the agent is done in chat, **paste its full response** into the ticket card’s output textarea and click **Submit Output + Analyze**
+4. The manager extracts a structured analysis and either pauses for your review (default) or auto-launches the next agent (when **Continuous mode** is on for that ticket)
+5. Use **Reassign Agent** on the active step to swap the assignee. Use **Spawn Parallel** to launch a side-chat lane that runs alongside the main timeline.
 
 ### Configuring Usage Tracking
 Command palette → **Copilot Agents: Configure Copilot Usage Tracking**  
@@ -122,8 +131,12 @@ Command palette → **Copilot Agents: New Agent** → choose a template (Debuggi
 | `Copilot Agents: Route Task to Agent` | Rank agents for a described task |
 | `Copilot Agents: Create Ticket Workflow` | Create a multi-step agent ticket |
 | `Copilot Agents: Run Next Ticket Step` | Launch the next queued step in chat |
-| `Copilot Agents: Complete Active Ticket Step` | Mark the current step done with a summary |
-| `Copilot Agents: Auto-Drive Ticket` | Cycle a ticket through every queued step end-to-end with automatic handoff summaries |
+| `Copilot Agents: Complete Active Ticket Step` | Mark the current step done with a manual summary |
+| `Copilot Agents: Submit Step Output to Manager` | Hand the agent’s chat output to the manager for analysis + advance |
+| `Copilot Agents: Reassign Ticket Step Agent` | Swap the agent on the active or next queued step |
+| `Copilot Agents: Spawn Parallel Agent Lane` | Start a side-chat lane on a chosen agent in parallel with the main workflow |
+| `Copilot Agents: Toggle Ticket Continuous Mode` | Toggle whether submitted output auto-launches the next agent |
+| `Copilot Agents: Advance Ticket (Manager-Mediated)` | Backwards-compatible single structured advance (replaces v1.0 Auto-Drive) |
 | `Copilot Agents: Seed Required Feature Tickets` | Create roadmap tickets for auto-assignment, chat orchestration, and completion-driven lifecycle |
 | `Copilot Agents: Configure Copilot Usage Tracking` | Set plan and seed baseline usage |
 | `Copilot Agents: Sync Usage From Copilot Panel` | Seed usage from Copilot Quick Settings percent-used value |

@@ -16,8 +16,17 @@ export interface DashboardActions {
   createTicket(): Thenable<void>;
   runTicketStep(ticketId: string, workflowResult?: string): Thenable<void>;
   completeTicketStep(ticketId: string, workflowResult?: string): Thenable<void>;
-  autoDriveTicket(ticketId: string, workflowResult?: string): Thenable<void>;
+  /** v1.1.0 — capture chat output, run manager analysis, advance gated. */
+  submitStepOutput(ticketId: string, output: string): Thenable<void>;
+  /** v1.1.0 — swap the agent on a queued (or active) step. */
+  reassignStepAgent(ticketId: string, stepId: string, agentName?: string): Thenable<void>;
+  /** v1.1.0 — launch a side-chat lane that runs in parallel to the main timeline. */
+  spawnParallelLane(ticketId: string, agentName?: string, prompt?: string): Thenable<void>;
+  /** v1.1.0 — toggle whether submitted output auto-launches the next agent. */
+  setContinuousMode(ticketId: string, enabled: boolean): Thenable<void>;
   setAutoProceedWorkflow(enabled: boolean): Thenable<void>;
+  /** v1.1.0 — list known agent names so reassignment / parallel pickers can render. */
+  listAgents(): string[];
   configureUsage(): Thenable<void>;
   openAgent(agentName: string): Thenable<void>;
   copyMention(agentName: string): Thenable<void>;
@@ -45,8 +54,10 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       const payload = message as {
         type?: string;
         ticketId?: string;
+        stepId?: string;
         agentName?: string;
         workflowResult?: string;
+        stepOutput?: string;
         enabled?: boolean;
       };
 
@@ -64,9 +75,32 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
             await this.actions.completeTicketStep(payload.ticketId, payload.workflowResult);
           }
           return;
-        case "autoDriveTicket":
+        case "submitStepOutput":
+          if (payload.ticketId && payload.stepOutput) {
+            await this.actions.submitStepOutput(payload.ticketId, payload.stepOutput);
+          }
+          return;
+        case "reassignStepAgent":
+          if (payload.ticketId && payload.stepId) {
+            await this.actions.reassignStepAgent(
+              payload.ticketId,
+              payload.stepId,
+              payload.agentName
+            );
+          }
+          return;
+        case "spawnParallelLane":
           if (payload.ticketId) {
-            await this.actions.autoDriveTicket(payload.ticketId, payload.workflowResult);
+            await this.actions.spawnParallelLane(
+              payload.ticketId,
+              payload.agentName,
+              payload.workflowResult
+            );
+          }
+          return;
+        case "setContinuousMode":
+          if (payload.ticketId && typeof payload.enabled === "boolean") {
+            await this.actions.setContinuousMode(payload.ticketId, payload.enabled);
           }
           return;
         case "setAutoProceedWorkflow":
@@ -112,12 +146,15 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
               status: item.status,
               autoProceedEnabled: snapshot.workflowAutomation.autoProceedEnabled,
             });
-            const commandType = item.status === "active" ? "completeTicketStep" : "runTicketStep";
+            // active / awaiting-output: jump straight to the per-step output
+            // textarea on the ticket card; queued: launch the next step.
+            const commandType =
+              item.status === "queued" ? "runTicketStep" : "focusTicket";
             return `
               <article class="queue-item">
                 <div>
                   <div class="queue-ticket">${escapeHtml(item.ticketTitle)}</div>
-                  <div class="queue-step">${escapeHtml(item.stepTitle)} · @${escapeHtml(item.agentName)}</div>
+                  <div class="queue-step">${escapeHtml(item.stepTitle)} · @${escapeHtml(item.agentName)} · <em>${escapeHtml(item.status)}</em></div>
                 </div>
                 <button class="ghost" data-command="${commandType}" data-ticket-id="${escapeHtml(item.ticketId)}">${buttonLabel}</button>
               </article>
@@ -155,10 +192,65 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                   .map((ticket) => {
                     const completed = ticket.steps.filter((step) => step.status === "done").length;
                     const activeStep = ticket.steps.find((step) => step.status === "active");
+                    const awaitingStep = ticket.steps.find(
+                      (step) => step.status === "awaiting-output"
+                    );
+                    const lastDoneStep = [...ticket.steps]
+                      .reverse()
+                      .find((step) => step.status === "done" && step.analysis);
+                    const lanes = ticket.lanes ?? [];
+                    const continuous = Boolean(ticket.continuousMode);
                     const nextAgent = ticket.nextAgentName
                       ? `@${ticket.nextAgentName}`
                       : "Workflow complete";
                     const primaryAgent = ticket.recommendedAgents[0];
+                    const stepFocus = activeStep ?? awaitingStep;
+                    const stepFocusBlock = stepFocus
+                      ? `
+                        <div class="step-focus" id="focus-${escapeHtml(ticket.id)}">
+                          <div class="step-focus-head">
+                            <strong>${escapeHtml(stepFocus.title)}</strong>
+                            <span class="pill">@${escapeHtml(stepFocus.agentName)}</span>
+                            <span class="pill muted">${escapeHtml(stepFocus.status)}</span>
+                          </div>
+                          <textarea
+                            class="step-output"
+                            data-ticket-id="${escapeHtml(ticket.id)}"
+                            placeholder="Paste the agent's full chat output here. The manager will analyze it and ${continuous ? "auto-launch" : "prepare"} the next agent."
+                          >${escapeHtml(stepFocus.output ?? "")}</textarea>
+                          <div class="step-focus-actions">
+                            <button data-command="submitStepOutput" data-ticket-id="${escapeHtml(ticket.id)}">Submit Output + Analyze</button>
+                            <button class="ghost" data-command="reassignStepAgent" data-ticket-id="${escapeHtml(ticket.id)}" data-step-id="${escapeHtml(stepFocus.id)}">Reassign Agent</button>
+                          </div>
+                        </div>
+                      `
+                      : "";
+                    const lastAnalysisBlock = lastDoneStep?.analysis
+                      ? `
+                        <details class="manager-analysis">
+                          <summary>Manager analysis \u2014 ${escapeHtml(lastDoneStep.title)} (@${escapeHtml(lastDoneStep.agentName)})</summary>
+                          <pre>${escapeHtml(lastDoneStep.analysis)}</pre>
+                        </details>
+                      `
+                      : "";
+                    const lanesBlock = lanes.length
+                      ? `
+                        <div class="lanes">
+                          <div class="lanes-head">Parallel lanes</div>
+                          ${lanes
+                            .map(
+                              (lane) => `
+                                <div class="lane">
+                                  <span class="pill">@${escapeHtml(lane.agentName)}</span>
+                                  <span class="lane-label">${escapeHtml(lane.label)}</span>
+                                  <span class="pill muted">${escapeHtml(lane.status)}</span>
+                                </div>
+                              `
+                            )
+                            .join("")}
+                        </div>
+                      `
+                      : "";
                     return `
                       <article class="ticket-card ticket-${status}">
                         <div class="ticket-topline">
@@ -182,6 +274,13 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                           <span>${completed}/${ticket.steps.length} steps complete</span>
                           <span>${escapeHtml(nextAgent)}</span>
                         </div>
+                        <label class="continuous-toggle">
+                          <input type="checkbox" data-command="setContinuousMode" data-ticket-id="${escapeHtml(ticket.id)}" ${continuous ? "checked" : ""} />
+                          Continuous mode (auto-launch next agent after each submitted output)
+                        </label>
+                        ${stepFocusBlock}
+                        ${lastAnalysisBlock}
+                        ${lanesBlock}
                         <div class="ticket-pills">
                           ${ticket.recommendedAgents
                             .map(
@@ -195,15 +294,13 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
                         </div>
                         <div class="ticket-actions">
                           <button data-command="runTicketStep" data-ticket-id="${escapeHtml(ticket.id)}">
-                            ${activeStep ? "Open Active Step" : "Run Next Step"}
+                            ${stepFocus ? "Re-Open Active Step" : "Run Next Step"}
                           </button>
-                          ${activeStep
-                            ? `<button class="ghost" data-command="completeTicketStep" data-ticket-id="${escapeHtml(ticket.id)}">Complete</button>`
-                            : primaryAgent
-                              ? `<button class="ghost" data-command="copyMention" data-agent-name="${escapeHtml(primaryAgent)}">Copy Lead</button>`
-                              : ""}
-                          ${status !== "done" && status !== "blocked"
-                            ? `<button class="ghost" data-command="autoDriveTicket" data-ticket-id="${escapeHtml(ticket.id)}">Auto-Drive</button>`
+                          ${primaryAgent && !stepFocus
+                            ? `<button class="ghost" data-command="copyMention" data-agent-name="${escapeHtml(primaryAgent)}">Copy Lead</button>`
+                            : ""}
+                          ${status !== "done"
+                            ? `<button class="ghost" data-command="spawnParallelLane" data-ticket-id="${escapeHtml(ticket.id)}">Spawn Parallel</button>`
                             : ""}
                         </div>
                       </article>
@@ -457,6 +554,84 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
       line-height: 1.45;
     }
 
+    /* v1.1.0 \u2014 manager-mediated UI elements */
+    .continuous-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      margin: 8px 0 4px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .step-focus {
+      border: 1px dashed var(--stroke);
+      border-radius: 10px;
+      padding: 10px;
+      margin: 6px 0 10px;
+      background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .step-focus-head {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .step-output {
+      width: 100%;
+      min-height: 96px;
+      border-radius: 8px;
+      border: 1px solid var(--stroke);
+      background: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      padding: 8px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 12px;
+      resize: vertical;
+    }
+    .step-focus-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .manager-analysis {
+      margin: 6px 0;
+      font-size: 11px;
+    }
+    .manager-analysis pre {
+      white-space: pre-wrap;
+      background: color-mix(in srgb, var(--surface-strong) 96%, transparent);
+      border-radius: 6px;
+      padding: 8px;
+      margin-top: 4px;
+    }
+    .lanes {
+      border-top: 1px solid var(--stroke);
+      padding-top: 6px;
+      margin-top: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .lanes-head {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--vscode-descriptionForeground);
+    }
+    .lane {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      font-size: 12px;
+    }
+    .lane-label { flex: 1; }
+    .pill.muted { opacity: 0.7; }
+    .step-awaiting-output { background: var(--vscode-editorWarning-foreground); }
+
     .queue-ticket,
     .ticket-title {
       font-weight: 700;
@@ -688,12 +863,11 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
 
       <article class="panel">
         <h2>Workflow Queue</h2>
-        <p class="subtitle">Start the next queued agent or complete the active handoff to move work across agents.</p>
+        <p class="subtitle">The manager surfaces each ticket\u2019s active focus point. Open a ticket to paste its chat output and let the manager analyze + advance.</p>
         <label class="queue-toggle">
           <input type="checkbox" id="auto-proceed-toggle" ${snapshot.workflowAutomation.autoProceedEnabled ? "checked" : ""} />
-          Auto-proceed workflow queue (complete active step and run next step automatically)
+          Default new tickets to continuous-mode (each ticket can still be toggled individually).
         </label>
-        <textarea id="workflow-result" class="workflow-result" placeholder="Optional workflow result text used in automatic handoff summaries."></textarea>
         <div class="queue-list">${queueMarkup}</div>
       </article>
     </section>
@@ -715,7 +889,6 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const resultBox = document.getElementById("workflow-result");
     const autoProceedToggle = document.getElementById("auto-proceed-toggle");
 
     if (autoProceedToggle instanceof HTMLInputElement) {
@@ -726,6 +899,22 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
         });
       });
     }
+
+    // Per-ticket continuous mode toggles. Sent eagerly on change so the
+    // manager state stays in sync with the UI even if the user navigates
+    // away mid-edit.
+    document.addEventListener("change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      if (target.dataset.command !== "setContinuousMode") return;
+      const ticketId = target.dataset.ticketId;
+      if (!ticketId) return;
+      vscode.postMessage({
+        type: "setContinuousMode",
+        ticketId,
+        enabled: target.checked,
+      });
+    });
 
     document.addEventListener("click", (event) => {
       const target = event.target;
@@ -738,11 +927,30 @@ export class AgentDashboardViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      // Continuous-mode change events are handled by the change listener
+      // above \u2014 click events here would fire as well and double-post.
+      if (button.dataset.command === "setContinuousMode") return;
+
+      const ticketId = button.dataset.ticketId;
+      // Per-step output textarea lives next to the submit button inside the
+      // ticket card, so we scope our lookup to the same card to avoid
+      // forwarding output from a different ticket.
+      let stepOutput;
+      if (ticketId) {
+        const card = button.closest(".ticket-card");
+        const textarea = card ? card.querySelector('textarea.step-output[data-ticket-id="' + ticketId + '"]') : null;
+        if (textarea instanceof HTMLTextAreaElement) {
+          stepOutput = textarea.value;
+        }
+      }
+
       vscode.postMessage({
         type: button.dataset.command,
-        ticketId: button.dataset.ticketId,
+        ticketId,
+        stepId: button.dataset.stepId,
         agentName: button.dataset.agentName,
-        workflowResult: resultBox instanceof HTMLTextAreaElement ? resultBox.value : undefined,
+        stepOutput,
+        workflowResult: stepOutput,
       });
     });
   </script>

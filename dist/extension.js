@@ -234,20 +234,29 @@ async function focusAgentManager() {
         // The container is already visible; focusing the dashboard view is best-effort.
     }
 }
+// Build the chat prompt that the manager sends to the active agent. The
+// prompt embeds every prior step’s verbatim chat output and the manager’s
+// structured analysis so the next agent always works from the actual
+// deliverables instead of a synthesized one-liner. This is the core of the
+// v1.1.0 manager-mediated workflow.
 function buildTicketQuery(ticket, step) {
-    const handoffs = ticket.steps
-        .filter((candidate) => candidate.status === "done" && candidate.summary)
-        .map((candidate) => `- ${candidate.title} (@${candidate.agentName}): ${candidate.summary}`)
-        .join("\n");
-    return [
-        `@${step.agentName}`,
-        `Ticket: ${ticket.title}`,
-        `Workspace: ${ticket.workspaceLabel}`,
-        `Original request: ${ticket.prompt}`,
-        handoffs ? `Prior handoffs:\n${handoffs}` : "No prior handoffs yet.",
-        `Current step: ${step.title}`,
-        `At the end, provide a concise handoff summary for the next agent or verifier.`,
-    ].join("\n\n");
+    const priorSteps = ticket.steps
+        .filter((candidate) => candidate.status === "done")
+        .map((candidate) => ({
+        title: candidate.title,
+        agentName: candidate.agentName,
+        summary: candidate.summary,
+        output: candidate.output,
+        analysis: candidate.analysis,
+    }));
+    return (0, workflowAutomation_1.buildStructuredHandoffPrompt)({
+        ticketTitle: ticket.title,
+        workspaceLabel: ticket.workspaceLabel,
+        originalRequest: ticket.prompt,
+        priorSteps,
+        currentStepTitle: step.title,
+        currentAgentName: step.agentName,
+    });
 }
 function pickTicketLabel(ticket) {
     const next = ticket.nextAgentName ? `@${ticket.nextAgentName}` : "complete";
@@ -271,13 +280,23 @@ function activate(context) {
         completeTicketStep: async (ticketId, workflowResult) => {
             await completeTicketStep(ticketId, workflowResult);
         },
-        autoDriveTicket: async (ticketId, workflowResult) => {
-            await autoDriveTicket(ticketId, workflowResult);
+        submitStepOutput: async (ticketId, output) => {
+            await submitStepOutput(ticketId, output);
+        },
+        reassignStepAgent: async (ticketId, stepId, agentName) => {
+            await reassignStepAgent(ticketId, stepId, agentName);
+        },
+        spawnParallelLane: async (ticketId, agentName, prompt) => {
+            await spawnParallelLane(ticketId, agentName, prompt);
+        },
+        setContinuousMode: async (ticketId, enabled) => {
+            await setContinuousMode(ticketId, enabled);
         },
         setAutoProceedWorkflow: async (enabled) => {
             await opsStore.setWorkflowAutomation({ autoProceedEnabled: enabled });
             refreshAll();
         },
+        listAgents: () => tree.getAll().map((agent) => agent.name),
         configureUsage: async () => {
             await vscode.commands.executeCommand("copilot-agents.configureUsage");
         },
@@ -352,8 +371,11 @@ function activate(context) {
         refreshAll();
         await focusAgentManager();
         vscode.window.showInformationMessage(`Created ticket: ${ticket.title} (${ticket.recommendedAgents.map((name) => `@${name}`).join(", ")})`);
-        const automation = opsStore.getWorkflowAutomation();
-        if (automation.autoProceedEnabled) {
+        // v1.1.0: never auto-launch on creation unless the ticket explicitly
+        // opted into continuous mode. The user kicks off step 1 manually so the
+        // first prompt always reaches the chat with the original request fully
+        // composed by the manager.
+        if (ticket.continuousMode) {
             await launchTicketStep(ticket.id);
         }
         return ticket;
@@ -534,29 +556,136 @@ function activate(context) {
         });
         refreshAll();
     }
-    // Cycle a ticket through every queued step in one shot. Each step is launched
-    // (chat opened with handoff prompt) and then auto-completed with a synthesized
-    // handoff summary so the next agent picks up immediately. This is what the user
-    // means by "tickets MUST get resolved and proceed on their own".
-    async function autoDriveTicket(ticketId, workflowResult) {
-        let safety = 0;
-        while (safety++ < 12) {
-            const ticket = opsStore.findTicket(ticketId);
-            if (!ticket)
-                return;
-            const hasMore = ticket.steps.some((step) => step.status === "queued" || step.status === "active");
-            if (!hasMore)
-                break;
-            // Make sure a step is active.
-            const active = ticket.steps.find((step) => step.status === "active");
-            if (!active) {
-                await launchTicketStep(ticket.id);
-            }
-            await completeTicketStep(ticket.id, workflowResult, true);
+    // v1.1.0 — manager-mediated single-step advance.
+    //
+    // Capture the chat output from the currently active step, run a local
+    // analysis, persist both on the step, and (only when the ticket is in
+    // continuous mode) compose+launch the next step’s prompt with that output
+    // quoted verbatim. This replaces the old blind `while` loop that fired
+    // chat queries without ever inspecting agent output.
+    async function submitStepOutput(ticketId, rawOutput) {
+        const ticket = opsStore.findTicket(ticketId);
+        if (!ticket) {
+            vscode.window.showInformationMessage("Ticket not found.");
+            return;
         }
-        vscode.window.showInformationMessage(`Auto-drive complete for ticket ${ticketId.slice(0, 12)}\u2026`);
+        const active = ticket.steps.find((step) => step.status === "active");
+        if (!active) {
+            vscode.window.showInformationMessage("There’s no active step waiting for output. Run the next step first.");
+            return;
+        }
+        const output = (rawOutput ?? "").trim();
+        if (!output) {
+            vscode.window.showWarningMessage("Paste the chat output for this step before submitting — the manager needs it to compose the next prompt.");
+            return;
+        }
+        const nextQueuedStep = ticket.steps.find((step) => step.status === "queued");
+        const analysis = (0, workflowAutomation_1.analyzeStepOutput)({
+            output,
+            stepTitle: active.title,
+            agentName: active.agentName,
+            nextAgentName: nextQueuedStep?.agentName,
+            nextStepTitle: nextQueuedStep?.title,
+        });
+        // Mark the step awaiting-output and store the analysis so the dashboard
+        // can render it as a preview before the user confirms continuous advance.
+        await opsStore.markStepAwaitingOutput(ticket.id, {
+            output,
+            analysis: analysis.fullText,
+        });
+        const summary = (0, workflowAutomation_1.buildAutomaticHandoffSummary)({
+            stepTitle: active.title,
+            agentName: active.agentName,
+            nextAgentName: nextQueuedStep?.agentName,
+            workflowResult: analysis.headline,
+        });
+        await opsStore.completeActiveStep(ticket.id, summary, {
+            output,
+            analysis: analysis.fullText,
+        });
+        refreshAll();
+        if (ticket.continuousMode && nextQueuedStep) {
+            await launchTicketStep(ticket.id);
+        }
+        else if (nextQueuedStep) {
+            vscode.window.showInformationMessage(`Step complete. Manager analysis stored. Click “Run Next Step” when you’re ready to launch @${nextQueuedStep.agentName}.`);
+        }
+        else {
+            vscode.window.showInformationMessage(`Workflow complete for ticket ${ticket.title}.`);
+        }
     }
-    async function completeTicketStep(ticketId, workflowResult, forceAutomatic = false) {
+    async function reassignStepAgent(ticketId, stepId, explicitAgent) {
+        const ticket = opsStore.findTicket(ticketId);
+        if (!ticket)
+            return;
+        const step = stepId
+            ? ticket.steps.find((candidate) => candidate.id === stepId)
+            : ticket.steps.find((candidate) => candidate.status === "queued" || candidate.status === "active");
+        if (!step) {
+            vscode.window.showInformationMessage("No reassignable step on that ticket.");
+            return;
+        }
+        const agentName = explicitAgent ??
+            (await vscode.window.showQuickPick(tree.getAll().map((agent) => ({ label: agent.name, description: agent.source })), { placeHolder: `Reassign ${step.title} (currently @${step.agentName})` }))?.label;
+        if (!agentName)
+            return;
+        await opsStore.reassignStepAgent(ticket.id, step.id, agentName);
+        refreshAll();
+        vscode.window.showInformationMessage(`Reassigned ${step.title} → @${agentName}.`);
+    }
+    async function spawnParallelLane(ticketId, explicitAgent, explicitPrompt) {
+        const ticket = opsStore.findTicket(ticketId);
+        if (!ticket)
+            return;
+        const agentName = explicitAgent ??
+            (await vscode.window.showQuickPick(tree.getAll().map((agent) => ({ label: agent.name, description: agent.source })), { placeHolder: "Choose an agent for the parallel lane" }))?.label;
+        if (!agentName)
+            return;
+        const prompt = explicitPrompt ??
+            (await vscode.window.showInputBox({
+                prompt: `Parallel lane prompt for @${agentName}`,
+                placeHolder: "What should this side-chat work on independently?",
+                value: ticket.prompt,
+            }));
+        if (!prompt)
+            return;
+        const lane = await opsStore.spawnParallelLane(ticket.id, {
+            agentName,
+            prompt,
+            label: `Lane — @${agentName}`,
+        });
+        if (!lane)
+            return;
+        const fullPrompt = [
+            `@${agentName}`,
+            `Parallel lane on ticket: ${ticket.title}`,
+            `Workspace: ${ticket.workspaceLabel}`,
+            `Lane goal: ${prompt}`,
+            `This is a side-chat running in parallel with the main workflow. When done, paste your output back into the lane card so the manager can fold it into the main timeline.`,
+        ].join("\n\n");
+        await openChatQuery(fullPrompt, `Parallel lane prompt copied for @${agentName}`);
+        await opsStore.recordAgentLaunch({
+            agentName,
+            model: tree.byName(agentName)?.model ?? "inherit",
+            promptText: fullPrompt,
+            source: "ticket-workflow",
+            ticketId: ticket.id,
+        });
+        refreshAll();
+    }
+    async function setContinuousMode(ticketId, enabled) {
+        await opsStore.setTicketContinuousMode(ticketId, enabled);
+        refreshAll();
+        vscode.window.showInformationMessage(enabled
+            ? "Continuous mode ON — each submitted output will auto-launch the next agent."
+            : "Continuous mode OFF — manager will pause between agents for your review.");
+    }
+    // Manual completion path. Used when the user wants to mark a step done
+    // without going through the structured submit-output flow (e.g. they
+    // resolved the work outside the chat). Continuous-mode advance is gated on
+    // the presence of a workflowResult — we never silently fire the next
+    // agent without something to forward.
+    async function completeTicketStep(ticketId, workflowResult) {
         const ticket = opsStore.findTicket(ticketId);
         if (!ticket) {
             vscode.window.showInformationMessage("Ticket not found.");
@@ -567,39 +696,25 @@ function activate(context) {
             vscode.window.showInformationMessage("No active step is running for that ticket.");
             return;
         }
-        const nextQueuedStep = ticket.steps.find((step) => step.status === "queued");
-        const automation = opsStore.getWorkflowAutomation();
-        const useAutomaticSummary = forceAutomatic ||
-            (workflowResult !== undefined && automation.autoProceedEnabled);
-        let summary;
-        if (useAutomaticSummary) {
-            summary = (0, workflowAutomation_1.buildAutomaticHandoffSummary)({
-                stepTitle: active.title,
-                agentName: active.agentName,
-                nextAgentName: nextQueuedStep?.agentName,
-                workflowResult,
-            });
+        // If the caller passed structured output, route through the manager so
+        // the analysis + verbatim quoting still happen.
+        if (workflowResult && workflowResult.trim()) {
+            await submitStepOutput(ticket.id, workflowResult);
+            return;
         }
-        else {
-            summary = await vscode.window.showInputBox({
-                prompt: `Handoff summary for ${active.title} (@${active.agentName})`,
-                placeHolder: "Summarize what changed, what remains, and what the next agent should verify.",
-                validateInput: (value) => value.trim() ? null : "A handoff summary keeps the next agent aligned",
-            });
-            if (!summary)
-                return;
-        }
-        await opsStore.completeActiveStep(ticket.id, summary);
+        const summary = await vscode.window.showInputBox({
+            prompt: `Handoff summary for ${active.title} (@${active.agentName})`,
+            placeHolder: "Summarize what changed, what remains, and what the next agent should verify.",
+            validateInput: (value) => value.trim() ? null : "A handoff summary keeps the next agent aligned",
+        });
+        if (!summary)
+            return;
+        await opsStore.completeActiveStep(ticket.id, summary, {});
         refreshAll();
-        const shouldAdvance = forceAutomatic
-            ? Boolean(nextQueuedStep)
-            : workflowResult !== undefined &&
-                (0, workflowAutomation_1.shouldAutoProceedWorkflow)({
-                    autoProceedEnabled: automation.autoProceedEnabled,
-                    hasQueuedNextStep: Boolean(nextQueuedStep),
-                });
-        if (shouldAdvance) {
-            await launchTicketStep(ticket.id);
+        if (ticket.continuousMode) {
+            const hasNext = ticket.steps.some((step) => step.status === "queued");
+            if (hasNext)
+                await launchTicketStep(ticket.id);
         }
     }
     // ── File Watcher ────────────────────────────────────────────────────────────
@@ -642,13 +757,68 @@ function activate(context) {
             return;
         await completeTicketStep(ticket.id, workflowResult);
     }));
+    // Backwards-compatible alias for any keybinding/menu still pointing at the
+    // old auto-drive command. Behaves as a single structured advance now.
     context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.autoDriveTicket", async (ticketId, workflowResult) => {
         const ticket = ticketId
             ? opsStore.findTicket(ticketId)
             : await pickTicket((candidate) => candidate.status !== "done" && candidate.status !== "blocked");
         if (!ticket)
             return;
-        await autoDriveTicket(ticket.id, workflowResult);
+        if (workflowResult && workflowResult.trim()) {
+            await submitStepOutput(ticket.id, workflowResult);
+        }
+        else {
+            await launchTicketStep(ticket.id);
+        }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.submitStepOutput", async (ticketId, output) => {
+        const ticket = ticketId
+            ? opsStore.findTicket(ticketId)
+            : await pickTicket((candidate) => candidate.steps.some((step) => step.status === "active"));
+        if (!ticket)
+            return;
+        const text = output ??
+            (await vscode.window.showInputBox({
+                prompt: "Paste the chat output for the active step",
+                placeHolder: "Full response from the agent — the manager will analyze and forward it.",
+                validateInput: (value) => value.trim() ? null : "Paste the chat output before submitting.",
+            }));
+        if (!text)
+            return;
+        await submitStepOutput(ticket.id, text);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.reassignStepAgent", async (ticketId, stepId, agentName) => {
+        const ticket = ticketId
+            ? opsStore.findTicket(ticketId)
+            : await pickTicket((candidate) => candidate.status !== "done");
+        if (!ticket)
+            return;
+        await reassignStepAgent(ticket.id, stepId, agentName);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.spawnParallelLane", async (ticketId, agentName, prompt) => {
+        const ticket = ticketId
+            ? opsStore.findTicket(ticketId)
+            : await pickTicket((candidate) => candidate.status !== "done");
+        if (!ticket)
+            return;
+        await spawnParallelLane(ticket.id, agentName, prompt);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.setContinuousMode", async (ticketId, enabled) => {
+        const ticket = ticketId
+            ? opsStore.findTicket(ticketId)
+            : await pickTicket((candidate) => candidate.status !== "done");
+        if (!ticket)
+            return;
+        const value = typeof enabled === "boolean"
+            ? enabled
+            : (await vscode.window.showQuickPick([
+                { label: "Continuous ON", value: true },
+                { label: "Continuous OFF", value: false },
+            ], { placeHolder: `Continuous mode for ${ticket.title}` }))?.value;
+        if (typeof value !== "boolean")
+            return;
+        await setContinuousMode(ticket.id, value);
     }));
     context.subscriptions.push(vscode.commands.registerCommand("copilot-agents.configureUsage", async () => {
         await configureUsage();

@@ -1,8 +1,8 @@
 {
   "name": "vs-code-agent-manager",
   "displayName": "VS Code Agent Manager",
-  "description": "Control center for VS Code Copilot agents — dashboard, premium usage tracking, multi-agent ticket workflows, and @route task orchestration.",
-  "version": "1.0.0",
+  "description": "Manager-mediated control center for VS Code Copilot agents — sequential output-gated handoffs, parallel side-chat lanes, agent reassignment, premium-usage tracking and ticket workflows.",
+  "version": "1.1.0",
   "publisher": "vs-code-agent-manager",
   "license": "MIT",
   "repository": {
@@ -126,8 +126,32 @@
       },
       {
         "command": "copilot-agents.autoDriveTicket",
-        "title": "Auto-Drive Ticket",
+        "title": "Advance Ticket (Manager-Mediated)",
         "icon": "$(rocket)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.submitStepOutput",
+        "title": "Submit Step Output to Manager",
+        "icon": "$(arrow-right)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.reassignStepAgent",
+        "title": "Reassign Ticket Step Agent",
+        "icon": "$(replace)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.spawnParallelLane",
+        "title": "Spawn Parallel Agent Lane",
+        "icon": "$(split-horizontal)",
+        "category": "Copilot Agents"
+      },
+      {
+        "command": "copilot-agents.setContinuousMode",
+        "title": "Toggle Ticket Continuous Mode",
+        "icon": "$(sync)",
         "category": "Copilot Agents"
       },
       {

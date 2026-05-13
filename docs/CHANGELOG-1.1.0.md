@@ -1,140 +1,95 @@
-# Release 1.1.0 — Auto-Drive, Step Pipeline, Persisted Plan Fix, and Wiring Restore
+# Release 1.1.0 — Manager-Mediated Workflow, Parallel Lanes, Agent Reassignment
 
-Date: 2026-05-12
+This release rewrites the multi-agent workflow loop. v1.0.0 fired chat queries
+in a tight `while` loop without ever inspecting the agent's chat output — that
+caused later agents to proceed without any of the prior agent's actual work.
+v1.1.0 replaces that loop with a strict, output-gated, manager-mediated
+sequence inspired by orchestration patterns from
+[`amazon-q-developer-cli`](https://github.com/aws/amazon-q-developer-cli) and
+[`patoles/agent-flow`](https://github.com/patoles/agent-flow):
 
-This release makes tickets resolve and proceed on their own once auto-proceed
-is enabled, fixes the side-panel premium display getting stuck on the previous
-quota, and adds a per-ticket workflow step pipeline visualization inspired by
-[`patoles/agent-flow`](https://github.com/patoles/agent-flow) and
-[`appsoftwareltd/vscode-agent-kanban`](https://github.com/appsoftwareltd/vscode-agent-kanban). It also restores the Agent Activity tree and previously-declared commands so the installed view wiring matches the extension manifest again.
+> **Manager runs step N → user pastes step N's chat output → manager analyzes →
+> manager composes step N+1 prompt with step N's output quoted verbatim →
+> launches step N+1.**
 
----
-
-## What changed
-
-### 1. `configureUsage` now always persists the chosen plan
-Selecting **Copilot Pro+ (1500)** then dismissing either of the two seed
-baseline prompts no longer aborts the flow. The seeds are optional; the new
-plan, label, and quota are always saved and the side panel updates immediately.
-
-- File: `src/extension.ts`
-- Function: `configureUsage()`
-
-### 2. New tickets auto-launch when auto-proceed is on
-`createTicketFromPrompt()` now reads `opsStore.getWorkflowAutomation()` and, if
-`autoProceedEnabled` is true, immediately calls `launchTicketStep(ticket.id)`
-so the first agent is assigned and opened in chat without manual clicks.
-
-- File: `src/extension.ts`
-- Function: `createTicketFromPrompt()`
-
-### 3. `Auto-Drive Ticket` command + per-card button
-A new `copilot-agents.autoDriveTicket` command cycles a ticket through every
-queued step. Each step is launched (chat opened with the handoff prompt) and
-auto-completed with a synthesized handoff summary so the next agent picks up
-immediately. An **Auto-Drive** button is rendered on every non-done /
-non-blocked ticket card.
-
-- Files: `src/extension.ts`, `src/dashboardView.ts`, `package.json`
-- Symbols: `autoDriveTicket()`, `DashboardActions.autoDriveTicket`,
-  command id `copilot-agents.autoDriveTicket`
-
-### 4. Workflow step pipeline on ticket cards
-Each ticket card now renders a numbered pill list of every step with status
-coloring (queued / active / done / blocked). Hover for the full step title,
-agent, and status.
-
-- File: `src/dashboardView.ts`
-- CSS classes: `.step-pipeline`, `.step-node`, `.step-active`,
-  `.step-done`, `.step-blocked`
-
-### 5. Wired previously-unwired dashboard actions
-`autoDriveTicket` and `setAutoProceedWorkflow` were declared on
-`DashboardActions` but never wired in `activate()`. They are now provided
-when constructing `AgentDashboardViewProvider`. This also unblocked
-TypeScript compilation.
-
-- File: `src/extension.ts`
-
-### 6. Restored Agent Activity and contributed command wiring
-The `copilot-agents.activity` tree view now gets its data provider again, and
-the contributed commands `copilot-agents.openAgentByName`,
-`copilot-agents.seedRequiredFeatureTickets`, and
-`copilot-agents.syncUsageFromCopilotPanel` are registered again so the shipped
-manifest matches runtime behavior.
-
-- File: `src/extension.ts`
-- File: `src/activityView.ts`
+Each transition is gated on the presence of captured output. There is no
+unattended advance unless the user explicitly enables Continuous Mode for that
+ticket.
 
 ---
 
-## Verification
+## Headline changes
 
-```powershell
-cd copilot-task-router
-npx tsc                                  # clean
-node --test dist/workflowAutomation.test.js   # 4/4 pass
-```
+### 1. Output-gated sequential advance
+- New step status `awaiting-output` between `active` and `done`.
+- New per-step fields `output` (raw chat text) and `analysis` (manager summary).
+- New `submitStepOutput(ticketId, output)` extension command.
+- The blind `while (safety++ < 12)` loop in `autoDriveTicket` is gone.
+  `copilot-agents.autoDriveTicket` is preserved as a backwards-compatible
+  alias that performs exactly **one** structured advance.
 
-Manual smoke test:
+### 2. Manager analysis + structured next-prompt
+- `analyzeStepOutput(...)` extracts headline, key points, and open questions
+  from the captured chat output (no LLM call — runs locally so it never burns
+  premium requests).
+- `buildStructuredHandoffPrompt(...)` composes the next agent's prompt with
+  every prior step's chat output quoted verbatim under explicit headings
+  (`Raw chat output:`, `Manager analysis:`, `Handoff summary:`).
+- The next agent always works from the actual deliverable, not a synthesized
+  one-liner.
 
-1. Open the **Copilot Agents** view → **Configure Usage** → pick **Copilot Pro+** → press Esc on both seed prompts. Side panel must show **1500** quota.
-2. Open the Workflow Queue panel, ensure **Auto-proceed** is checked.
-3. Click **New Ticket**, give a description. The first agent should auto-open in chat.
-4. On any open ticket card, click **Auto-Drive**. The ticket should move to **done** with handoff summaries on every step.
-5. Confirm each ticket card shows a numbered pipeline of steps with the active one highlighted in blue and completed ones in green.
+### 3. Per-ticket Continuous Mode
+- Each ticket carries a `continuousMode` flag. When ON, submitting output
+  auto-launches the next agent. When OFF (default), the manager pauses for
+  user review between agents.
+- New command `copilot-agents.setContinuousMode`.
+- The dashboard renders a per-ticket checkbox toggle.
+
+### 4. Parallel side-chat lanes
+- New `TicketLane` model (`id`, `agentName`, `prompt`, `status`, `output`).
+- New command `copilot-agents.spawnParallelLane(ticketId, agentName?, prompt?)`
+  opens a side chat with the chosen agent that runs alongside the main
+  timeline.
+- Each lane is rendered on its ticket card with status pills.
+
+### 5. Agent reassignment without restart
+- New command `copilot-agents.reassignStepAgent(ticketId, stepId, agentName?)`.
+- Swaps the assignee on the active or any queued step in place.
+- Dashboard exposes a **Reassign Agent** button on the active step.
+
+### 6. Dashboard UI overhaul
+- Per-step output textarea with **Submit Output + Analyze** button on every
+  active / awaiting-output step.
+- Per-ticket **Continuous mode** toggle + **Spawn Parallel** action.
+- Manager analysis preview rendered as a collapsible `<details>` block under
+  the most recent completed step.
+- Workflow Queue surfaces awaiting-output steps so they don't get lost.
+- Removed the global `#workflow-result` textarea — output is now per-step.
 
 ---
 
-## Rollback (fully reversible)
+## File-by-file map
 
-The release includes source edits, matching generated `dist/` output, and the
-release note in this file. To revert this release without losing other in-flight
-changes, restore the affected tracked files and rebuild:
-
-```powershell
-cd copilot-task-router
-git checkout HEAD -- `
-  src/extension.ts `
-  src/dashboardView.ts `
-  package.json `
-  README.md
-npm run compile
-```
-
-If the changes are already committed, revert just this release commit:
-
-```powershell
-git log --oneline -- src/extension.ts src/dashboardView.ts | Select-Object -First 5
-git revert <commit-sha-for-1.1.0>
-npm run compile
-```
-
-To revert the deployed unpacked extension copy:
-
-```powershell
-$ext = "$env:USERPROFILE\.vscode\extensions\local.copilot-task-router-0.3.0"
-Copy-Item -Path .\package.json -Destination $ext -Force
-Copy-Item -Path .\dist\* -Destination "$ext\dist" -Force
-code --command workbench.action.reloadWindow
-```
-
-To completely remove this release without git, manually undo:
-
-| File | Change to undo |
+| File | What changed |
 |---|---|
-| `src/extension.ts` | Remove the `autoDriveTicket()` function, the `copilot-agents.autoDriveTicket` command registration, the `autoDriveTicket` and `setAutoProceedWorkflow` entries on the `DashboardActions` literal, and the auto-launch block at the end of `createTicketFromPrompt()`. Restore the original `configureUsage()` early-return guards on the seed inputs. |
-| `src/dashboardView.ts` | Remove `autoDriveTicket` from `DashboardActions`, the `case "autoDriveTicket"` branch, the `<ol class="step-pipeline">` block, the `Auto-Drive` button in ticket actions, and the `.step-pipeline` / `.step-node*` CSS rules. |
-| `package.json` | Remove the `copilot-agents.autoDriveTicket` command entry. |
-| `README.md` | Remove the new pipeline / Auto-Drive bullets and the Auto-Drive Ticket row in the commands table. |
-
-No state schema migrations were introduced, so no `globalState` /
-`workspaceState` cleanup is required when rolling back.
+| `src/state.ts` | Added `awaiting-output` status, `output`/`analysis`/`laneId` on `WorkflowStep`, `TicketLane` interface, `lanes`/`continuousMode` on `AgentTicket`. New store methods: `markStepAwaitingOutput`, `reassignStepAgent`, `setTicketContinuousMode`, `spawnParallelLane`. `completeActiveStep` now takes `(ticketId, summary, { output?, analysis? })`. Snapshot queue now surfaces `awaiting-output`. |
+| `src/workflowAutomation.ts` | Added `analyzeStepOutput` (headline/key-points/open-questions extractor) and `buildStructuredHandoffPrompt` (verbatim prior-output quoter). `getQueueActionLabel` now returns `Submit Output + Advance` for awaiting-output / active+auto cases and `Mark Step Complete` for active+manual. `shouldAutoProceedWorkflow` now refuses to advance when `hasCapturedOutput === false`. |
+| `src/workflowAutomation.test.ts` | Updated existing label/auto-proceed tests; added analyzer + structured-prompt coverage. |
+| `src/extension.ts` | Removed blind `autoDriveTicket` loop. New functions: `submitStepOutput`, `reassignStepAgent`, `spawnParallelLane`, `setContinuousMode`. New commands wire to those. `buildTicketQuery` now uses `buildStructuredHandoffPrompt`. `createTicketFromPrompt` no longer auto-launches step 1 unless the ticket explicitly has `continuousMode: true`. |
+| `src/dashboardView.ts` | New `DashboardActions` shape; new message switch cases for `submitStepOutput`, `reassignStepAgent`, `spawnParallelLane`, `setContinuousMode`; per-step output textarea, manager-analysis preview, lanes block, continuous-mode toggle. New CSS for the new panels. |
+| `package.json` | Bumped `version` to `1.1.0`; added contributions for `submitStepOutput`, `reassignStepAgent`, `spawnParallelLane`, `setContinuousMode`. |
+| `README.md` | Rewrote Features / Usage / Commands sections to reflect manager-mediated flow. |
+| `docs/ARCHITECTURE.md` | New \u2014 architecture overview + Mermaid sequence diagram. |
+| `docs/AUTOMATION-MODEL.md` | New \u2014 explains Manual / Continuous / Parallel modes. |
 
 ---
 
-## Inspired by
+## Migration notes
 
-- [`patoles/agent-flow`](https://github.com/patoles/agent-flow) — real-time agent step visualization
-- [`appsoftwareltd/vscode-agent-kanban`](https://github.com/appsoftwareltd/vscode-agent-kanban) — kanban for agentic workflows
-- [`shyamsridhar123/agentsmith-cli`](https://github.com/shyamsridhar123/agentsmith-cli) — handoff and sub-agent generation
+- `copilot-agents.autoDriveTicket` is still available but performs a single
+  manager-mediated advance. Existing keybindings keep working.
+- `DashboardActions.autoDriveTicket` was replaced by `submitStepOutput`,
+  `reassignStepAgent`, `spawnParallelLane`, and `setContinuousMode`. Any
+  third-party consumers should switch to those.
+- The `#workflow-result` global textarea was removed in favor of per-step
+  textareas inside each ticket card.
